@@ -436,65 +436,156 @@ class InstagramBot {
     await this.dismissPopups();
   }
 
+  // ─── Use Instagram's internal API via the authenticated browser ───
+  // This is much more reliable than scraping DOM selectors
+
+  async apiGetInbox() {
+    try {
+      const result = await this.page.evaluate(async () => {
+        const res = await fetch('/api/v1/direct_v2/inbox/?per_page=20', {
+          credentials: 'include',
+          headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        });
+        return await res.json();
+      });
+      return result;
+    } catch (e) {
+      console.error('[BOT] API inbox error:', e.message);
+      return null;
+    }
+  }
+
+  async apiGetThread(threadId) {
+    try {
+      const result = await this.page.evaluate(async (tid) => {
+        const res = await fetch(`/api/v1/direct_v2/threads/${tid}/`, {
+          credentials: 'include',
+          headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        });
+        return await res.json();
+      }, threadId);
+      return result;
+    } catch (e) {
+      console.error('[BOT] API thread error:', e.message);
+      return null;
+    }
+  }
+
+  async apiGetPendingInbox() {
+    try {
+      const result = await this.page.evaluate(async () => {
+        const res = await fetch('/api/v1/direct_v2/pending_inbox/?per_page=20', {
+          credentials: 'include',
+          headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        });
+        return await res.json();
+      });
+      return result;
+    } catch (e) {
+      console.error('[BOT] API pending inbox error:', e.message);
+      return null;
+    }
+  }
+
+  async apiSendMessage(threadId, text) {
+    try {
+      const result = await this.page.evaluate(async (tid, msg) => {
+        // Get CSRF token from cookies
+        const csrfToken = document.cookie.match(/csrftoken=([^;]+)/)?.[1] || '';
+        const body = new URLSearchParams();
+        body.append('action', 'send_item');
+        body.append('thread_ids', `[${tid}]`);
+        body.append('client_context', `${Date.now()}_${Math.random()}`);
+        body.append('text', msg);
+
+        const res = await fetch('/api/v1/direct_v2/threads/broadcast/text/', {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'X-CSRFToken': csrfToken,
+            'X-Requested-With': 'XMLHttpRequest',
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: body.toString(),
+        });
+        return await res.json();
+      }, threadId, text);
+      return result;
+    } catch (e) {
+      console.error('[BOT] API send error:', e.message);
+      return null;
+    }
+  }
+
+  async apiApproveThread(threadId) {
+    try {
+      const result = await this.page.evaluate(async (tid) => {
+        const csrfToken = document.cookie.match(/csrftoken=([^;]+)/)?.[1] || '';
+        const res = await fetch(`/api/v1/direct_v2/threads/${tid}/approve/`, {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'X-CSRFToken': csrfToken,
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+        });
+        return await res.json();
+      }, threadId);
+      return result;
+    } catch (e) {
+      console.error('[BOT] API approve error:', e.message);
+      return null;
+    }
+  }
+
   async getUnreadConversations() {
-    await this.goToInbox();
-    await this.humanDelay(1500, 3000);
+    // Make sure we're on Instagram so API calls work with cookies
+    const currentUrl = this.page.url();
+    if (!currentUrl.includes('instagram.com')) {
+      await this.goToInbox();
+    }
 
     const unreadConvos = [];
 
     try {
-      const conversationItems = await this.page.$$('[role="listbox"] > div > div, div[class*="x9f619"] a[href*="/direct/t/"]');
+      // Check main inbox
+      const inbox = await this.apiGetInbox();
+      if (inbox?.inbox?.threads) {
+        for (const thread of inbox.inbox.threads) {
+          const lastItem = thread.items?.[0];
+          const isUnread = !thread.read_state || (lastItem && lastItem.user_id !== thread.viewer_id);
 
-      if (conversationItems.length === 0) {
-        try {
-          const dmIcon = await this.page.$('svg[aria-label="Messenger"], svg[aria-label="Direct messaging"], a[href="/direct/inbox/"]');
-          if (dmIcon) {
-            await dmIcon.click();
-            await this.humanDelay(2000, 3000);
+          if (isUnread && lastItem) {
+            const username = thread.users?.[0]?.username || 'unknown';
+            const lastMessage = lastItem.text || lastItem.item_type || '';
+            unreadConvos.push({
+              threadId: thread.thread_id,
+              username,
+              lastMessage,
+              isPending: false,
+            });
           }
-        } catch {}
+        }
+        console.log(`[BOT] Inbox: ${inbox.inbox.threads.length} threads, ${unreadConvos.length} unread`);
       }
 
-      const convoLinks = await this.page.$$('a[href*="/direct/t/"]');
-      console.log(`[BOT] Found ${convoLinks.length} conversations in inbox`);
-
-      for (const link of convoLinks) {
-        try {
-          const href = await link.getAttribute('href');
-          const threadId = href.match(/\/direct\/t\/(\d+)/)?.[1];
-
-          const parent = await link.evaluateHandle(el => el.closest('div[role="listitem"]') || el.parentElement?.parentElement);
-          const debugInfo = await parent.evaluate(el => {
-            const spans = el.querySelectorAll('span');
-            let hasBold = false;
-            let fontWeights = [];
-            for (const span of spans) {
-              const style = window.getComputedStyle(span);
-              fontWeights.push(style.fontWeight);
-              if (style.fontWeight === '600' || style.fontWeight === '700' || style.fontWeight === 'bold') {
-                hasBold = true;
-              }
-            }
-            const dots = el.querySelectorAll('div[style*="background-color: rgb(0, 149, 246)"], div[class*="blue"]');
-            return {
-              hasBold,
-              hasDots: dots.length > 0,
-              fontWeights: fontWeights.slice(0, 5).join(','),
-              text: el.textContent?.substring(0, 80) || ''
-            };
-          });
-
-          const hasUnread = debugInfo.hasBold || debugInfo.hasDots;
-          console.log(`[BOT] Thread ${threadId}: unread=${hasUnread} (bold=${debugInfo.hasBold}, dots=${debugInfo.hasDots}, weights=${debugInfo.fontWeights}, text="${debugInfo.text.substring(0, 40)}")`);
-
-          if (hasUnread) {
-            if (threadId) {
-              unreadConvos.push({ element: link, threadId, href });
-            }
+      // Check pending/requests inbox too
+      const pending = await this.apiGetPendingInbox();
+      if (pending?.inbox?.threads) {
+        for (const thread of pending.inbox.threads) {
+          const lastItem = thread.items?.[0];
+          if (lastItem) {
+            const username = thread.users?.[0]?.username || 'unknown';
+            const lastMessage = lastItem.text || lastItem.item_type || '';
+            unreadConvos.push({
+              threadId: thread.thread_id,
+              username,
+              lastMessage,
+              isPending: true,
+            });
           }
-        } catch (e) {
-          console.log(`[BOT] Error checking conversation: ${e.message}`);
         }
+        console.log(`[BOT] Pending: ${pending.inbox.threads.length} message requests`);
       }
     } catch (error) {
       console.error('[BOT] Error scanning inbox:', error.message);
@@ -503,54 +594,27 @@ class InstagramBot {
     return unreadConvos;
   }
 
-  async openConversation(convo) {
-    console.log(`[BOT] Opening conversation ${convo.threadId}...`);
-    await this.page.goto(`https://www.instagram.com/direct/t/${convo.threadId}/`, {
-      waitUntil: 'domcontentloaded',
-    });
-    await this.humanDelay(2000, 3000);
-    console.log(`[BOT] Conversation opened (Seen triggered)`);
-  }
-
-  async getConversationInfo() {
+  async getConversationMessages(threadId) {
     try {
-      let username = 'unknown';
-      try {
-        const headerLink = await this.page.$('header a[href*="/"] span, div[role="heading"] span');
-        if (headerLink) {
-          username = await headerLink.textContent();
-          username = username.trim().replace('@', '');
-        }
-      } catch {}
+      const thread = await this.apiGetThread(threadId);
+      if (!thread?.thread) return { username: 'unknown', messages: [], lastMessage: null };
 
-      const messages = await this.page.evaluate(() => {
-        const result = [];
-        const messageRows = document.querySelectorAll('div[role="row"]');
+      const username = thread.thread.users?.[0]?.username || 'unknown';
+      const viewerId = thread.thread.viewer_id;
 
-        for (const row of messageRows) {
-          const textElements = row.querySelectorAll('div[dir="auto"] span');
-          for (const el of textElements) {
-            const text = el.textContent?.trim();
-            if (text && text.length > 0 && text.length < 2000) {
-              const rect = row.getBoundingClientRect();
-              result.push({
-                text,
-                position: rect.left < window.innerWidth / 2 ? 'left' : 'right',
-              });
-            }
-          }
-        }
+      const messages = (thread.thread.items || []).reverse().map(item => ({
+        text: item.text || (item.item_type === 'like' ? '❤️' : `[${item.item_type}]`),
+        isFromThem: item.user_id !== viewerId,
+        timestamp: item.timestamp,
+      }));
 
-        return result;
-      });
+      const theirMessages = messages.filter(m => m.isFromThem);
+      const lastMessage = theirMessages.length > 0 ? theirMessages[theirMessages.length - 1].text : null;
 
-      const theirMessages = messages.filter(m => m.position === 'left');
-      const latestMessage = theirMessages.length > 0 ? theirMessages[theirMessages.length - 1].text : null;
-
-      return { username, latestMessage, allMessages: messages };
+      return { username, messages, lastMessage };
     } catch (error) {
       console.error('[BOT] Error reading conversation:', error.message);
-      return { username: 'unknown', latestMessage: null, allMessages: [] };
+      return { username: 'unknown', messages: [], lastMessage: null };
     }
   }
 
@@ -691,78 +755,80 @@ class InstagramBot {
     console.log(`[BOT] Found ${unread.length} unread conversation(s)`);
 
     // Don't process all at once — a real person handles them one at a time
-    // with breaks in between
-    const maxToProcess = Math.min(unread.length, 3); // max 3 at a time
+    const maxToProcess = Math.min(unread.length, 3);
 
     for (let i = 0; i < maxToProcess; i++) {
       const convo = unread[i];
       try {
-        // Open the conversation (triggers "Seen")
-        await this.openConversation(convo);
+        // If it's a message request, approve it first
+        if (convo.isPending) {
+          console.log(`[BOT] Approving message request from @${convo.username}...`);
+          await this.apiApproveThread(convo.threadId);
+          await this.humanDelay(1000, 2000);
+        }
 
-        // Realistic reading time — actually read the message
-        const info = await this.getConversationInfo();
+        // Get full conversation via API
+        const info = await this.getConversationMessages(convo.threadId);
+        const latestMessage = info.lastMessage || convo.lastMessage;
 
-        if (!info.latestMessage) {
-          console.log(`[BOT] No readable message in conversation ${convo.threadId}`);
+        if (!latestMessage) {
+          console.log(`[BOT] No readable message from @${convo.username}`);
           continue;
         }
 
-        const msgId = `${convo.threadId}_${info.latestMessage.substring(0, 50)}`;
+        const msgId = `${convo.threadId}_${latestMessage.substring(0, 50)}`;
         if (this.processedMessages.has(msgId)) {
-          console.log(`[BOT] Already processed message in ${convo.threadId}`);
+          console.log(`[BOT] Already processed message from @${convo.username}`);
           continue;
         }
 
-        console.log(`[BOT] New message from @${info.username}: ${info.latestMessage}`);
+        console.log(`[BOT] New message from @${convo.username}: ${latestMessage}`);
 
         // ─── Realistic response timing ───
-        // A real person: sees message → reads it → thinks → types reply
-
-        // 1. Reading time (based on message length, ~200-250 WPM reading speed)
-        const wordCount = info.latestMessage.split(' ').length;
+        const wordCount = latestMessage.split(' ').length;
         const readingMs = Math.max(wordCount * 300, 2000) + Math.floor(Math.random() * 3000);
         console.log(`[BOT] Reading (${Math.round(readingMs/1000)}s)...`);
         await this.humanDelay(readingMs, readingMs + 2000);
 
-        // 2. Sometimes a person doesn't reply immediately — they might:
-        //    - Check the profile first
-        //    - Think about what to say
-        //    - Get distracted briefly
+        // Sometimes extra think time
         if (Math.random() < 0.3) {
-          const extraThinkTime = Math.floor(Math.random() * 15000) + 5000; // 5-20s extra
+          const extraThinkTime = Math.floor(Math.random() * 15000) + 5000;
           console.log(`[BOT] Thinking (${Math.round(extraThinkTime/1000)}s)...`);
           await this.humanDelay(extraThinkTime, extraThinkTime + 3000);
         }
 
-        // 3. Get AI response (this takes a second or two from the API)
+        // Get AI response
         if (this.onMessage) {
-          const response = await this.onMessage(convo.threadId, info.username, info.latestMessage);
+          const response = await this.onMessage(convo.threadId, convo.username, latestMessage);
 
           if (response) {
-            // 4. Brief pause before typing starts
-            await this.humanDelay(1500, 4000);
+            // Simulate typing delay based on response length
+            const typingMs = response.length * 50 + Math.floor(Math.random() * 3000) + 2000;
+            console.log(`[TYPING] Simulating ${Math.round(typingMs/1000)}s delay for natural feel`);
+            await this.humanDelay(typingMs, typingMs + 2000);
 
-            // 5. Type and send with realistic keystrokes
-            await this.typeAndSend(response);
-            this.messageCount++;
+            // Send via API
+            const sendResult = await this.apiSendMessage(convo.threadId, response);
+            if (sendResult?.status === 'ok' || sendResult?.status_code === '200') {
+              console.log(`[MSG] Replied to @${convo.username}: ${response.substring(0, 60)}...`);
+              this.messageCount++;
+            } else {
+              console.error(`[BOT] Failed to send to @${convo.username}:`, JSON.stringify(sendResult));
+            }
           }
         }
 
         this.processedMessages.add(msgId);
         this.saveProcessed();
 
-        // Break between conversations (real person doesn't instantly jump to next)
+        // Break between conversations
         if (i < maxToProcess - 1) {
-          const breakTime = Math.floor(Math.random() * 10000) + 5000; // 5-15s between convos
+          const breakTime = Math.floor(Math.random() * 10000) + 5000;
           console.log(`[BOT] Taking a break before next conversation (${Math.round(breakTime/1000)}s)...`);
           await this.humanDelay(breakTime, breakTime + 3000);
         }
-
-        await this.goToInbox();
-        await this.humanDelay(1500, 3000);
       } catch (error) {
-        console.error(`[BOT] Error processing conversation ${convo.threadId}:`, error.message);
+        console.error(`[BOT] Error processing @${convo.username}:`, error.message);
       }
     }
   }
