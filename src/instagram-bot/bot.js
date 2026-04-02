@@ -451,25 +451,26 @@ class InstagramBot {
 
   async _apiCall(endpoint, method = 'GET', body = null) {
     try {
-      const result = await this.page.evaluate(async (url, meth, bodyStr, extraHeaders) => {
+      const args = { url: endpoint, method, body, headers: this._apiHeaders() };
+      const result = await this.page.evaluate(async (a) => {
         const csrfToken = document.cookie.match(/csrftoken=([^;]+)/)?.[1] || '';
         const headers = {
-          ...extraHeaders,
+          ...a.headers,
           'X-CSRFToken': csrfToken,
         };
-        if (bodyStr) headers['Content-Type'] = 'application/x-www-form-urlencoded';
+        if (a.body) headers['Content-Type'] = 'application/x-www-form-urlencoded';
 
-        const opts = { method: meth, credentials: 'include', headers };
-        if (bodyStr) opts.body = bodyStr;
+        const opts = { method: a.method, credentials: 'include', headers };
+        if (a.body) opts.body = a.body;
 
-        const res = await fetch('https://www.instagram.com' + url, opts);
+        const res = await fetch('https://www.instagram.com' + a.url, opts);
         const text = await res.text();
         try {
           return { ok: true, data: JSON.parse(text), status: res.status };
         } catch {
           return { ok: false, text: text.substring(0, 300), status: res.status };
         }
-      }, endpoint, method, body, this._apiHeaders());
+      }, args);
 
       if (!result.ok) {
         console.error(`[BOT] API ${endpoint} returned non-JSON (status ${result.status}): ${result.text.substring(0, 100)}`);
