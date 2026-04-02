@@ -272,24 +272,64 @@ class InstagramBot {
         // Click the 2FA input and type the code
         await twoFactorInput.click();
         await this.humanDelay(300, 600);
+        // Clear any existing value first
+        await this.page.keyboard.press('Control+A');
+        await this.humanDelay(100, 200);
         await this.page.keyboard.type(this.twoFactorCode, { delay: Math.floor(Math.random() * 60) + 40 });
-        await this.humanDelay(500, 1000);
+        await this.humanDelay(800, 1500);
 
-        const confirmBtn = await this.page.$('button:has-text("Confirm"), button[type="button"]:not([aria-label])');
+        console.log('[BOT] Looking for confirm/submit button...');
+        // Try multiple selectors for the confirm button
+        let confirmBtn = null;
+        const btnSelectors = [
+          'button:has-text("Confirm")',
+          'button:has-text("confirm")',
+          'button[type="submit"]',
+          'button:has-text("Submit")',
+          'button:has-text("Next")',
+          'button:has-text("Verify")',
+        ];
+        for (const sel of btnSelectors) {
+          confirmBtn = await this.page.$(sel);
+          if (confirmBtn) {
+            console.log(`[BOT] Found confirm button with selector: ${sel}`);
+            break;
+          }
+        }
+
         if (confirmBtn) {
           await confirmBtn.click();
+          console.log('[BOT] Confirm button clicked');
         } else {
+          console.log('[BOT] No confirm button found, pressing Enter');
           await this.page.keyboard.press('Enter');
         }
 
         this.waitingFor2FA = false;
         this.twoFactorCode = null;
+
+        // Wait for navigation after 2FA
+        console.log('[BOT] Waiting for page to load after 2FA...');
+        await this.page.waitForNavigation({ timeout: 15000 }).catch(() => {
+          console.log('[BOT] No navigation detected, checking page anyway...');
+        });
         await this.humanDelay(3000, 5000);
+        console.log('[BOT] Post-2FA URL: ' + this.page.url());
+
+        // Handle "Trust this device" or "Save login info" pages
+        await this.dismissPopups();
+        await this.humanDelay(2000, 3000);
       }
 
+      const currentUrl = this.page.url();
+      console.log('[BOT] Checking login status, URL: ' + currentUrl);
       const success = await this.isLoggedIn();
       if (!success) {
+        // Take a screenshot for debugging
         console.error('[BOT] Login failed. Check credentials.');
+        console.log('[BOT] Check /bot/screenshot to see what the page looks like.');
+        // Keep the page accessible for screenshot debugging
+        console.log('[BOT] Bot page still accessible for debugging.');
         return false;
       }
 

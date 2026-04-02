@@ -508,4 +508,26 @@ async function start() {
   }
 }
 
+// Retry login endpoint - so you don't need to redeploy
+app.get('/bot/retry-login', async (req, res) => {
+  if (!global.igBot) {
+    return res.status(400).json({ error: 'Bot not initialized' });
+  }
+  try {
+    console.log('[BOT] Retrying login...');
+    // Close old browser and start fresh
+    await global.igBot.stop().catch(() => {});
+    await global.igBot.init();
+    const loggedIn = await global.igBot.login();
+    if (loggedIn) {
+      global.igBot.startPolling(15000);
+      res.json({ success: true, message: 'Login successful, bot is now monitoring DMs' });
+    } else {
+      res.json({ success: false, message: 'Login failed. Check /bot/screenshot for details' });
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 start();
