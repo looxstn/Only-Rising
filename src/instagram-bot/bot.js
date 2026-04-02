@@ -146,22 +146,48 @@ class InstagramBot {
     console.log('[BOT] Logging in as @' + this.username + '...');
 
     try {
-      await this.page.waitForSelector('input[name="username"]', { timeout: 15000 });
+      // Handle cookie consent popup first (common in EU)
+      try {
+        const cookieBtn = await this.page.waitForSelector('button:has-text("Allow all cookies"), button:has-text("Allow essential and optional cookies"), button:has-text("Accept"), button:has-text("Only allow essential cookies")', { timeout: 5000 });
+        if (cookieBtn) {
+          console.log('[BOT] Dismissing cookie popup...');
+          await cookieBtn.click();
+          await this.humanDelay(2000, 3000);
+        }
+      } catch {}
+
+      // Take a screenshot for debugging if login form not found
+      console.log('[BOT] Current URL: ' + this.page.url());
+      console.log('[BOT] Waiting for login form...');
+
+      // Try multiple selectors for the login form
+      await this.page.waitForSelector('input[name="username"], input[aria-label="Phone number, username, or email"], form[id="loginForm"] input', { timeout: 20000 });
+
+      const usernameInput = await this.page.$('input[name="username"]') || await this.page.$('input[aria-label="Phone number, username, or email"]');
+      if (!usernameInput) {
+        console.error('[BOT] Could not find username input');
+        return false;
+      }
 
       // Click the field first, wait, then type slowly like a real person
-      await this.page.click('input[name="username"]');
+      await usernameInput.click();
       await this.humanDelay(400, 800);
-      await this.humanType('input[name="username"]', this.username);
+      await this.page.keyboard.type(this.username, { delay: Math.floor(Math.random() * 80) + 40 });
       await this.humanDelay(600, 1200);
 
       // Tab to password field like a human would
       await this.page.keyboard.press('Tab');
       await this.humanDelay(300, 700);
-      await this.humanType('input[name="password"]', this.password);
+      await this.page.keyboard.type(this.password, { delay: Math.floor(Math.random() * 80) + 40 });
       await this.humanDelay(1000, 2000);
 
-      // Click login
-      await this.page.click('button[type="submit"]');
+      // Click login button
+      const loginBtn = await this.page.$('button[type="submit"]') || await this.page.$('button:has-text("Log in"), button:has-text("Log In")');
+      if (loginBtn) {
+        await loginBtn.click();
+      } else {
+        await this.page.keyboard.press('Enter');
+      }
       console.log('[BOT] Login submitted, waiting...');
 
       await this.page.waitForNavigation({ timeout: 30000 }).catch(() => {});
