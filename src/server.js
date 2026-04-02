@@ -45,6 +45,7 @@ const weeklyAnalysis = new WeeklyAnalysis(
 // ─── Middleware ───
 
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // ─── ManyChat Webhook (POST) ───
 // ManyChat sends creator messages here via External Request action
