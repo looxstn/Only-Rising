@@ -143,15 +143,16 @@ class InstagramBot {
   }
 
   async login() {
-    // First check if we have a saved session that's still valid
-    // Navigate to homepage (not login page) to test cookies
     console.log('[BOT] Checking if session is still valid...');
     console.log('[BOT] Session file exists: ' + fs.existsSync(SESSION_PATH));
-    await this.page.goto('https://www.instagram.com/', { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
-    await this.humanDelay(3000, 5000);
+
+    // Navigate to Instagram and wait for it to fully render
+    await this.page.goto('https://www.instagram.com/', { waitUntil: 'networkidle', timeout: 45000 }).catch(() => {});
+    // Wait extra time for SPA to render
+    await this.humanDelay(5000, 8000);
     console.log('[BOT] Page loaded, URL: ' + this.page.url());
 
-    // Check if already logged in from cookies
+    // Check if already logged in
     const loggedIn = await this.isLoggedIn();
     if (loggedIn) {
       console.log('[BOT] Already logged in from saved session - no login needed');
@@ -160,50 +161,78 @@ class InstagramBot {
       return true;
     }
 
-    console.log('[BOT] Session expired or not found, doing full login...');
-    console.log('[BOT] Navigating to login page...');
-    await this.page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
-    await this.humanDelay(2000, 4000);
-    console.log('[BOT] Login page URL: ' + this.page.url());
+    // Might be on a "Continue as" screen or redirected to login
+    // Wait and detect what screen we're on
+    console.log('[BOT] Not logged in yet, detecting screen...');
 
+    // Try up to 3 times with different approaches
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      console.log(`[BOT] Login attempt ${attempt}/3...`);
+      const currentUrl = this.page.url();
+      console.log(`[BOT] Current URL: ${currentUrl}`);
+
+      try {
+        // Wait for SOMETHING to render
+        await this.page.waitForSelector('button, input, a[href*="accounts"]', { timeout: 15000 });
+      } catch {
+        console.log('[BOT] Page still loading, waiting more...');
+        await this.humanDelay(5000, 8000);
+      }
+
+      // SCREEN 1: "Continue as" screen
+      const continueBtn = await this.page.$('button:has-text("Continue"), div[role="button"]:has-text("Continue"), a:has-text("Continue")');
+      if (continueBtn) {
+        console.log('[BOT] Found "Continue as" screen, clicking...');
+        await continueBtn.click();
+        await this.humanDelay(5000, 8000);
+        await this.page.waitForNavigation({ timeout: 15000 }).catch(() => {});
+        await this.humanDelay(3000, 5000);
+
+        if (await this.isLoggedIn()) {
+          console.log('[BOT] Logged in via Continue');
+          await this.dismissPopups();
+          await this.saveSession();
+          return true;
+        }
+        continue;
+      }
+
+      // SCREEN 2: Cookie consent popup
+      const cookieBtn = await this.page.$('button:has-text("Allow all cookies"), button:has-text("Allow essential and optional cookies"), button:has-text("Accept"), button:has-text("Only allow essential cookies")');
+      if (cookieBtn) {
+        console.log('[BOT] Dismissing cookie popup...');
+        await cookieBtn.click();
+        await this.humanDelay(2000, 3000);
+        continue; // Re-check what's behind it
+      }
+
+      // SCREEN 3: Login form
+      const loginInput = await this.page.$('input[type="text"], input[name="username"], input[name="email"]');
+      if (loginInput) {
+        console.log('[BOT] Found login form, entering credentials...');
+        break; // Exit loop and proceed to credential entry
+      }
+
+      // SCREEN 4: Not on login page yet
+      if (!currentUrl.includes('accounts/login')) {
+        console.log('[BOT] Navigating to login page...');
+        await this.page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+        await this.humanDelay(5000, 8000);
+        continue;
+      }
+
+      // Nothing found, wait and retry
+      console.log('[BOT] Page not ready, waiting...');
+      await this.humanDelay(5000, 8000);
+    }
+
+    // Now enter credentials
     console.log('[BOT] Logging in as @' + this.username + '...');
 
     try {
-      // Handle "Continue as" screen (Instagram remembers the account)
-      try {
-        const continueBtn = await this.page.$('button:has-text("Continue"), a:has-text("Continue"), div[role="button"]:has-text("Continue")');
-        if (continueBtn) {
-          console.log('[BOT] Found "Continue as" screen, clicking Continue...');
-          await continueBtn.click();
-          await this.page.waitForNavigation({ timeout: 15000 }).catch(() => {});
-          await this.humanDelay(3000, 5000);
-
-          const nowLoggedIn = await this.isLoggedIn();
-          if (nowLoggedIn) {
-            console.log('[BOT] Logged in via Continue button');
-            await this.dismissPopups();
-            await this.saveSession();
-            return true;
-          }
-        }
-      } catch {}
-
-      // Handle cookie consent popup first (common in EU)
-      try {
-        const cookieBtn = await this.page.waitForSelector('button:has-text("Allow all cookies"), button:has-text("Allow essential and optional cookies"), button:has-text("Accept"), button:has-text("Only allow essential cookies")', { timeout: 5000 });
-        if (cookieBtn) {
-          console.log('[BOT] Dismissing cookie popup...');
-          await cookieBtn.click();
-          await this.humanDelay(2000, 3000);
-        }
-      } catch {}
-
-      console.log('[BOT] Current URL: ' + this.page.url());
-      console.log('[BOT] Waiting for login form...');
       console.log('[BOT] Looking for login fields...');
-
-      // Wait for any input field on the page
-      await this.page.waitForSelector('input', { timeout: 20000 });
+      // Wait for input fields with generous timeout
+      await this.page.waitForSelector('input', { timeout: 30000 });
 
       // Get all input fields and find the right ones
       const inputs = await this.page.$$('input');
@@ -389,11 +418,14 @@ class InstagramBot {
   async isLoggedIn() {
     try {
       const indicators = await Promise.race([
-        this.page.waitForSelector('svg[aria-label="Home"]', { timeout: 5000 }).then(() => true),
-        this.page.waitForSelector('a[href="/direct/inbox/"]', { timeout: 5000 }).then(() => true),
-        this.page.waitForSelector('span[role="link"]:has-text("Direct")', { timeout: 5000 }).then(() => true),
+        this.page.waitForSelector('svg[aria-label="Home"]', { timeout: 10000 }).then(() => 'home-svg'),
+        this.page.waitForSelector('a[href="/direct/inbox/"]', { timeout: 10000 }).then(() => 'dm-link'),
+        this.page.waitForSelector('svg[aria-label="Messages"]', { timeout: 10000 }).then(() => 'messages-svg'),
+        this.page.waitForSelector('span:has-text("Messages")', { timeout: 10000 }).then(() => 'messages-text'),
+        this.page.waitForSelector('nav[role="navigation"]', { timeout: 10000 }).then(() => 'nav'),
       ]);
-      return !!indicators;
+      console.log(`[BOT] Logged in check: found ${indicators}`);
+      return true;
     } catch {
       return false;
     }
