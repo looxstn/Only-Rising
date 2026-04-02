@@ -237,6 +237,34 @@ app.post('/whatsapp-reply', async (req, res) => {
 
 // ─── Admin endpoints ───
 
+// Submit 2FA code for Instagram bot login
+app.post('/bot/2fa', (req, res) => {
+  const code = req.body.code || req.query.code;
+  if (!code) {
+    return res.status(400).json({ error: 'code is required' });
+  }
+  if (global.igBot && global.igBot.submit2FACode(code)) {
+    res.json({ success: true, message: '2FA code submitted' });
+  } else {
+    res.status(400).json({ error: 'Bot is not waiting for 2FA code' });
+  }
+});
+
+// Simple 2FA form page
+app.get('/bot/2fa', (req, res) => {
+  res.send(`
+    <html><body style="font-family:sans-serif;max-width:400px;margin:50px auto;text-align:center">
+      <h2>Instagram 2FA Code</h2>
+      <p>Enter the 2FA code sent to your phone:</p>
+      <form method="POST" action="/bot/2fa">
+        <input name="code" type="text" placeholder="123456" style="font-size:24px;padding:10px;width:200px;text-align:center" autofocus>
+        <br><br>
+        <button type="submit" style="font-size:18px;padding:10px 30px;background:#c864ff;color:white;border:none;border-radius:8px;cursor:pointer">Submit</button>
+      </form>
+    </body></html>
+  `);
+});
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({
@@ -408,6 +436,14 @@ async function start() {
       username: process.env.IG_BOT_USERNAME,
       password: process.env.IG_BOT_PASSWORD,
       onMessage: handleBotMessage,
+      onTwoFactorNeeded: async () => {
+        const serverUrl = process.env.RAILWAY_PUBLIC_DOMAIN
+          ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+          : `https://web-production-30bf0.up.railway.app`;
+        await whatsapp.sendAlert(
+          `Only Rising Bot needs your 2FA code to login to Instagram.\n\nGo here to enter it:\n${serverUrl}/bot/2fa\n\nYou have 5 minutes.`
+        );
+      },
     });
 
     global.igBot = bot;

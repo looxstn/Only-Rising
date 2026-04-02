@@ -6,14 +6,17 @@ const SESSION_PATH = path.join(__dirname, '../../data/ig-session.json');
 const PROCESSED_PATH = path.join(__dirname, '../../data/processed-messages.json');
 
 class InstagramBot {
-  constructor({ username, password, onMessage }) {
+  constructor({ username, password, onMessage, onTwoFactorNeeded }) {
     this.username = username;
     this.password = password;
     this.onMessage = onMessage; // async callback(senderId, senderUsername, messageText)
+    this.onTwoFactorNeeded = onTwoFactorNeeded; // async callback() - notify that 2FA is needed
     this.browser = null;
     this.context = null;
     this.page = null;
     this.isRunning = false;
+    this.waitingFor2FA = false;
+    this.twoFactorCode = null;
     this.processedMessages = this.loadProcessed();
   }
 
@@ -112,8 +115,48 @@ class InstagramBot {
       // Check for 2FA
       const twoFactorInput = await this.page.$('input[name="verificationCode"]');
       if (twoFactorInput) {
-        console.error('[BOT] 2FA required. Please disable 2FA or login manually first to create a session.');
-        return false;
+        console.log('[BOT] 2FA required. Waiting for code...');
+        this.waitingFor2FA = true;
+
+        // Notify that 2FA code is needed (sends WhatsApp alert)
+        if (this.onTwoFactorNeeded) {
+          await this.onTwoFactorNeeded();
+        }
+
+        // Wait up to 5 minutes for the code to be submitted
+        const maxWait = 300000; // 5 minutes
+        const checkInterval = 2000; // check every 2 seconds
+        let waited = 0;
+
+        while (!this.twoFactorCode && waited < maxWait) {
+          await new Promise(resolve => setTimeout(resolve, checkInterval));
+          waited += checkInterval;
+        }
+
+        if (!this.twoFactorCode) {
+          console.error('[BOT] 2FA code not received within 5 minutes');
+          this.waitingFor2FA = false;
+          return false;
+        }
+
+        console.log('[BOT] 2FA code received, entering...');
+
+        // Enter the 2FA code
+        await this.page.fill('input[name="verificationCode"]', this.twoFactorCode);
+        await this.humanDelay(500, 1000);
+
+        // Click confirm/submit button
+        const confirmBtn = await this.page.$('button:has-text("Confirm"), button[type="button"]:not([aria-label])');
+        if (confirmBtn) {
+          await confirmBtn.click();
+        } else {
+          await this.page.keyboard.press('Enter');
+        }
+
+        this.waitingFor2FA = false;
+        this.twoFactorCode = null;
+
+        await this.humanDelay(3000, 5000);
       }
 
       // Check if login succeeded
@@ -474,6 +517,16 @@ class InstagramBot {
     for (const char of text) {
       await this.page.type(selector, char, { delay: Math.floor(Math.random() * 100) + 30 });
     }
+  }
+
+  // Submit a 2FA code (called from the API endpoint)
+  submit2FACode(code) {
+    if (this.waitingFor2FA) {
+      this.twoFactorCode = code.toString().trim();
+      console.log('[BOT] 2FA code submitted');
+      return true;
+    }
+    return false;
   }
 
   async stop() {
