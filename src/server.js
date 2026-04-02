@@ -15,6 +15,24 @@ const trainingExamples = require('./ai/training-examples');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ─── Live log buffer ───
+const LOG_BUFFER_SIZE = 200;
+const logBuffer = [];
+const originalLog = console.log;
+const originalError = console.error;
+console.log = (...args) => {
+  const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+  logBuffer.push({ time: new Date().toISOString(), type: 'log', msg });
+  if (logBuffer.length > LOG_BUFFER_SIZE) logBuffer.shift();
+  originalLog.apply(console, args);
+};
+console.error = (...args) => {
+  const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+  logBuffer.push({ time: new Date().toISOString(), type: 'error', msg });
+  if (logBuffer.length > LOG_BUFFER_SIZE) logBuffer.shift();
+  originalError.apply(console, args);
+};
+
 // Serve landing page
 app.use(express.static(require('path').join(__dirname, '../public')));
 
@@ -509,6 +527,110 @@ async function start() {
 }
 
 // Retry login endpoint - so you don't need to redeploy
+// Live logs API
+app.get('/bot/logs', (req, res) => {
+  const since = req.query.since ? new Date(req.query.since).toISOString() : null;
+  const logs = since ? logBuffer.filter(l => l.time > since) : logBuffer;
+  res.json(logs);
+});
+
+// Live dashboard
+app.get('/bot/dashboard', (req, res) => {
+  res.send(`<!DOCTYPE html>
+<html><head>
+<title>Only Rising Bot - Live</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0a; color: #e0e0e0; font-family: -apple-system, system-ui, sans-serif; padding: 16px; }
+  h1 { font-size: 18px; color: #c864ff; margin-bottom: 4px; }
+  .status { font-size: 13px; color: #888; margin-bottom: 16px; }
+  .status .live { color: #4ade80; }
+  .status .dead { color: #f87171; }
+  .stats { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+  .stat { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 12px 16px; flex: 1; min-width: 120px; }
+  .stat .label { font-size: 11px; color: #888; text-transform: uppercase; }
+  .stat .value { font-size: 20px; font-weight: 600; color: #fff; margin-top: 2px; }
+  #logs { background: #111; border: 1px solid #222; border-radius: 8px; padding: 12px; height: calc(100vh - 200px); overflow-y: auto; font-family: 'SF Mono', Monaco, monospace; font-size: 12px; line-height: 1.6; }
+  .log-line { padding: 1px 0; }
+  .log-line .time { color: #555; margin-right: 8px; }
+  .log-line.error { color: #f87171; }
+  .log-line .bot { color: #60a5fa; }
+  .log-line .ai { color: #c864ff; }
+  .log-line .msg { color: #4ade80; }
+  .log-line .sheets { color: #fbbf24; }
+  .log-line .whatsapp { color: #22c55e; }
+  .log-line .typing { color: #888; }
+</style>
+</head><body>
+<h1>Only Rising Bot</h1>
+<div class="status">Status: <span id="statusLabel" class="live">Connecting...</span> | <span id="lastUpdate">-</span></div>
+<div class="stats">
+  <div class="stat"><div class="label">Bot</div><div class="value" id="botStatus">-</div></div>
+  <div class="stat"><div class="label">Messages</div><div class="value" id="msgCount">-</div></div>
+  <div class="stat"><div class="label">URL</div><div class="value" id="botUrl" style="font-size:11px;word-break:break-all">-</div></div>
+</div>
+<div id="logs"></div>
+<script>
+let lastTime = null;
+let msgCount = 0;
+
+function colorLine(msg) {
+  if (msg.includes('[BOT]')) return 'bot';
+  if (msg.includes('[AI]')) return 'ai';
+  if (msg.includes('[MSG]')) return 'msg';
+  if (msg.includes('[SHEETS]')) return 'sheets';
+  if (msg.includes('[WHATSAPP]')) return 'whatsapp';
+  if (msg.includes('[TYPING]')) return 'typing';
+  return '';
+}
+
+async function poll() {
+  try {
+    const url = '/bot/logs' + (lastTime ? '?since=' + encodeURIComponent(lastTime) : '');
+    const res = await fetch(url);
+    const logs = await res.json();
+    const el = document.getElementById('logs');
+
+    logs.forEach(l => {
+      const div = document.createElement('div');
+      div.className = 'log-line ' + (l.type === 'error' ? 'error' : '') ;
+      const t = new Date(l.time).toLocaleTimeString();
+      const cls = colorLine(l.msg);
+      div.innerHTML = '<span class="time">' + t + '</span><span class="' + cls + '">' + l.msg.replace(/</g,'&lt;') + '</span>';
+      el.appendChild(div);
+      lastTime = l.time;
+      if (l.msg.includes('[MSG]')) msgCount++;
+    });
+
+    if (logs.length > 0) {
+      el.scrollTop = el.scrollHeight;
+      document.getElementById('msgCount').textContent = msgCount;
+    }
+
+    document.getElementById('lastUpdate').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+
+    // Get status
+    const sRes = await fetch('/bot/status').catch(() => null);
+    if (sRes) {
+      const status = await sRes.json();
+      document.getElementById('botStatus').textContent = status.waitingFor2FA ? '2FA' : (status.url?.includes('instagram.com') ? 'Running' : 'Starting');
+      document.getElementById('botUrl').textContent = status.url || '-';
+      document.getElementById('statusLabel').textContent = 'Connected';
+      document.getElementById('statusLabel').className = 'live';
+    }
+  } catch(e) {
+    document.getElementById('statusLabel').textContent = 'Disconnected';
+    document.getElementById('statusLabel').className = 'dead';
+  }
+}
+
+poll();
+setInterval(poll, 3000);
+</script>
+</body></html>`);
+});
+
 app.get('/bot/retry-login', async (req, res) => {
   if (!global.igBot) {
     return res.status(400).json({ error: 'Bot not initialized' });
