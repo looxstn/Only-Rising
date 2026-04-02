@@ -169,6 +169,25 @@ class InstagramBot {
     console.log('[BOT] Logging in as @' + this.username + '...');
 
     try {
+      // Handle "Continue as" screen (Instagram remembers the account)
+      try {
+        const continueBtn = await this.page.$('button:has-text("Continue"), a:has-text("Continue"), div[role="button"]:has-text("Continue")');
+        if (continueBtn) {
+          console.log('[BOT] Found "Continue as" screen, clicking Continue...');
+          await continueBtn.click();
+          await this.page.waitForNavigation({ timeout: 15000 }).catch(() => {});
+          await this.humanDelay(3000, 5000);
+
+          const nowLoggedIn = await this.isLoggedIn();
+          if (nowLoggedIn) {
+            console.log('[BOT] Logged in via Continue button');
+            await this.dismissPopups();
+            await this.saveSession();
+            return true;
+          }
+        }
+      } catch {}
+
       // Handle cookie consent popup first (common in EU)
       try {
         const cookieBtn = await this.page.waitForSelector('button:has-text("Allow all cookies"), button:has-text("Allow essential and optional cookies"), button:has-text("Accept"), button:has-text("Only allow essential cookies")', { timeout: 5000 });
@@ -179,11 +198,8 @@ class InstagramBot {
         }
       } catch {}
 
-      // Take a screenshot for debugging if login form not found
       console.log('[BOT] Current URL: ' + this.page.url());
       console.log('[BOT] Waiting for login form...');
-
-      // Find the username/email input using multiple strategies
       console.log('[BOT] Looking for login fields...');
 
       // Wait for any input field on the page
