@@ -437,105 +437,74 @@ class InstagramBot {
   }
 
   // ─── Use Instagram's internal API via the authenticated browser ───
-  // This is much more reliable than scraping DOM selectors
+  // Requires correct headers to get JSON instead of HTML
 
-  async apiGetInbox() {
+  _apiHeaders() {
+    return {
+      'X-Requested-With': 'XMLHttpRequest',
+      'X-IG-App-ID': '936619743392459',
+      'X-ASBD-ID': '129477',
+      'X-IG-WWW-Claim': 'hmac.AR3W0DThY2Mu5Fag4sQynIrq0OaGrR1IMjjNhNS0ebAi5Q5Y',
+      'Accept': '*/*',
+    };
+  }
+
+  async _apiCall(endpoint, method = 'GET', body = null) {
     try {
-      const result = await this.page.evaluate(async () => {
-        const res = await fetch('/api/v1/direct_v2/inbox/?per_page=20', {
-          credentials: 'include',
-          headers: { 'X-Requested-With': 'XMLHttpRequest' },
-        });
-        return await res.json();
-      });
-      return result;
+      const result = await this.page.evaluate(async (url, meth, bodyStr, extraHeaders) => {
+        const csrfToken = document.cookie.match(/csrftoken=([^;]+)/)?.[1] || '';
+        const headers = {
+          ...extraHeaders,
+          'X-CSRFToken': csrfToken,
+        };
+        if (bodyStr) headers['Content-Type'] = 'application/x-www-form-urlencoded';
+
+        const opts = { method: meth, credentials: 'include', headers };
+        if (bodyStr) opts.body = bodyStr;
+
+        const res = await fetch('https://www.instagram.com' + url, opts);
+        const text = await res.text();
+        try {
+          return { ok: true, data: JSON.parse(text), status: res.status };
+        } catch {
+          return { ok: false, text: text.substring(0, 300), status: res.status };
+        }
+      }, endpoint, method, body, this._apiHeaders());
+
+      if (!result.ok) {
+        console.error(`[BOT] API ${endpoint} returned non-JSON (status ${result.status}): ${result.text.substring(0, 100)}`);
+        return null;
+      }
+      return result.data;
     } catch (e) {
-      console.error('[BOT] API inbox error:', e.message);
+      console.error(`[BOT] API ${endpoint} error:`, e.message);
       return null;
     }
+  }
+
+  async apiGetInbox() {
+    return this._apiCall('/api/v1/direct_v2/inbox/?per_page=20&persistentBadging=true&folder=0');
   }
 
   async apiGetThread(threadId) {
-    try {
-      const result = await this.page.evaluate(async (tid) => {
-        const res = await fetch(`/api/v1/direct_v2/threads/${tid}/`, {
-          credentials: 'include',
-          headers: { 'X-Requested-With': 'XMLHttpRequest' },
-        });
-        return await res.json();
-      }, threadId);
-      return result;
-    } catch (e) {
-      console.error('[BOT] API thread error:', e.message);
-      return null;
-    }
+    return this._apiCall(`/api/v1/direct_v2/threads/${threadId}/`);
   }
 
   async apiGetPendingInbox() {
-    try {
-      const result = await this.page.evaluate(async () => {
-        const res = await fetch('/api/v1/direct_v2/pending_inbox/?per_page=20', {
-          credentials: 'include',
-          headers: { 'X-Requested-With': 'XMLHttpRequest' },
-        });
-        return await res.json();
-      });
-      return result;
-    } catch (e) {
-      console.error('[BOT] API pending inbox error:', e.message);
-      return null;
-    }
+    return this._apiCall('/api/v1/direct_v2/pending_inbox/?per_page=20');
   }
 
   async apiSendMessage(threadId, text) {
-    try {
-      const result = await this.page.evaluate(async (tid, msg) => {
-        // Get CSRF token from cookies
-        const csrfToken = document.cookie.match(/csrftoken=([^;]+)/)?.[1] || '';
-        const body = new URLSearchParams();
-        body.append('action', 'send_item');
-        body.append('thread_ids', `[${tid}]`);
-        body.append('client_context', `${Date.now()}_${Math.random()}`);
-        body.append('text', msg);
-
-        const res = await fetch('/api/v1/direct_v2/threads/broadcast/text/', {
-          method: 'POST',
-          credentials: 'include',
-          headers: {
-            'X-CSRFToken': csrfToken,
-            'X-Requested-With': 'XMLHttpRequest',
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
-          body: body.toString(),
-        });
-        return await res.json();
-      }, threadId, text);
-      return result;
-    } catch (e) {
-      console.error('[BOT] API send error:', e.message);
-      return null;
-    }
+    const body = new URLSearchParams();
+    body.append('action', 'send_item');
+    body.append('thread_ids', `[${threadId}]`);
+    body.append('client_context', `${Date.now()}_${Math.random()}`);
+    body.append('text', text);
+    return this._apiCall('/api/v1/direct_v2/threads/broadcast/text/', 'POST', body.toString());
   }
 
   async apiApproveThread(threadId) {
-    try {
-      const result = await this.page.evaluate(async (tid) => {
-        const csrfToken = document.cookie.match(/csrftoken=([^;]+)/)?.[1] || '';
-        const res = await fetch(`/api/v1/direct_v2/threads/${tid}/approve/`, {
-          method: 'POST',
-          credentials: 'include',
-          headers: {
-            'X-CSRFToken': csrfToken,
-            'X-Requested-With': 'XMLHttpRequest',
-          },
-        });
-        return await res.json();
-      }, threadId);
-      return result;
-    } catch (e) {
-      console.error('[BOT] API approve error:', e.message);
-      return null;
-    }
+    return this._apiCall(`/api/v1/direct_v2/threads/${threadId}/approve/`, 'POST');
   }
 
   async getUnreadConversations() {
