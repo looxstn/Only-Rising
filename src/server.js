@@ -3,14 +3,13 @@ const express = require('express');
 const crypto = require('crypto');
 const cron = require('node-cron');
 
-const InstagramAPI = require('./meta/instagram');
+const ManyChatAPI = require('./manychat/api');
 const ConversationEngine = require('./ai/conversation-engine');
 const conversationStore = require('./conversations/store');
 const WhatsAppAlerts = require('./alerts/whatsapp');
 const SheetsLogger = require('./sheets/logger');
 const WeeklyAnalysis = require('./feedback/weekly-analysis');
 const trainingExamples = require('./ai/training-examples');
-const { getPageByFbId, getPageByIgId } = require('./config/pages');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -20,10 +19,7 @@ app.use(express.static(require('path').join(__dirname, '../public')));
 
 // ─── Initialize services ───
 
-const instagram = new InstagramAPI(
-  process.env.META_PAGE_ACCESS_TOKEN,
-  process.env.IG_ACCOUNT_ID
-);
+const manychat = new ManyChatAPI(process.env.MANYCHAT_API_TOKEN);
 
 const ai = new ConversationEngine(process.env.ANTHROPIC_API_KEY);
 
@@ -47,187 +43,154 @@ const weeklyAnalysis = new WeeklyAnalysis(
 
 // ─── Middleware ───
 
-// Raw body for signature verification
-app.use('/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json());
 
-// ─── Webhook verification (GET) ───
+// ─── ManyChat Webhook (POST) ───
+// ManyChat sends creator messages here via External Request action
+// Expected JSON body from ManyChat:
+// {
+//   "subscriber_id": "12345678",
+//   "username": "creator_username",
+//   "first_name": "Jane",
+//   "last_name": "Doe",
+//   "message": "the creator's message text",
+//   "ig_username": "creator_ig_handle",
+//   "follower_count": 5000,
+//   "page": "charmframes"
+// }
 
-app.get('/webhook', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-
-  if (mode === 'subscribe' && token === process.env.WEBHOOK_VERIFY_TOKEN) {
-    console.log('[WEBHOOK] Verified successfully');
-    return res.status(200).send(challenge);
-  }
-
-  console.warn('[WEBHOOK] Verification failed');
-  return res.sendStatus(403);
-});
-
-// ─── Webhook handler (POST) ───
-
-app.post('/webhook', async (req, res) => {
-  // Always respond 200 quickly to avoid Meta retries
-  res.sendStatus(200);
-
+app.post('/manychat-webhook', async (req, res) => {
   try {
-    const rawBody = req.body.toString();
-    console.log('[WEBHOOK] POST received:', rawBody.substring(0, 500));
-    const body = JSON.parse(rawBody);
+    const body = req.body;
+    console.log('[MANYCHAT WEBHOOK] Received:', JSON.stringify(body).substring(0, 500));
 
-    // Verify signature
-    const signature = req.headers['x-hub-signature-256'];
-    if (signature && process.env.META_APP_SECRET) {
-      const isValid = InstagramAPI.verifySignature(
-        req.body.toString(),
-        signature,
-        process.env.META_APP_SECRET
+    // Validate required fields
+    const subscriberId = body.subscriber_id;
+    const messageText = body.message || body.last_input_text || body.text;
+
+    if (!subscriberId || !messageText) {
+      console.warn('[MANYCHAT WEBHOOK] Missing subscriber_id or message');
+      return res.status(400).json({ error: 'subscriber_id and message are required' });
+    }
+
+    // Verify webhook secret if configured
+    if (process.env.MANYCHAT_WEBHOOK_SECRET) {
+      const authHeader = req.headers['authorization'] || req.headers['x-webhook-secret'];
+      if (authHeader !== process.env.MANYCHAT_WEBHOOK_SECRET && authHeader !== `Bearer ${process.env.MANYCHAT_WEBHOOK_SECRET}`) {
+        console.warn('[MANYCHAT WEBHOOK] Invalid webhook secret');
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+    }
+
+    // Build creator profile from ManyChat data
+    const username = body.ig_username || body.username || body.first_name || 'unknown';
+    const followerCount = body.follower_count || 0;
+    const page = body.page || 'charmframes';
+
+    const profile = {
+      username,
+      follower_count: followerCount,
+      page,
+    };
+
+    // Set profile in conversation store (use ManyChat subscriber_id as the user key)
+    conversationStore.setProfile(subscriberId, username, page);
+
+    // Add creator message to conversation history
+    conversationStore.addMessage(subscriberId, 'creator', messageText);
+
+    // Get full conversation for AI context
+    const conversation = conversationStore.getConversation(subscriberId);
+
+    // Generate AI response
+    const aiResponse = await ai.generateResponse(conversation.messages, profile);
+
+    if (!aiResponse || !aiResponse.message) {
+      console.error('[MSG] AI returned no message');
+      return res.status(500).json({ error: 'AI returned no message' });
+    }
+
+    console.log(`[AI] Response for ${subscriberId} (@${username}): ${aiResponse.message}`);
+    console.log(`[AI] Stage: ${aiResponse.conversation_stage} | Escalation: ${JSON.stringify(aiResponse.escalation)} | Qualification: ${JSON.stringify(aiResponse.qualification)}`);
+
+    // Send the response back via ManyChat
+    try {
+      await manychat.sendMessage(subscriberId, aiResponse.message);
+    } catch (sendError) {
+      console.error(`[MSG] Failed to send ManyChat message to ${subscriberId}:`, sendError.message);
+      // Still return the message so ManyChat can use it in the flow as fallback
+    }
+
+    // Store assistant message
+    conversationStore.addMessage(subscriberId, 'assistant', aiResponse.message);
+
+    // Update conversation stage
+    if (aiResponse.conversation_stage) {
+      conversationStore.updateStage(subscriberId, aiResponse.conversation_stage);
+    }
+
+    // Process qualification data
+    if (aiResponse.qualification) {
+      const q = aiResponse.qualification;
+      conversationStore.updateQualification(subscriberId, q.field, q.value);
+    }
+
+    // Mark if Calendly was sent
+    if (aiResponse.send_calendly) {
+      const convo = conversationStore.getConversation(subscriberId);
+      convo.calendlySent = true;
+      conversationStore.saveConversation(subscriberId, convo);
+    }
+
+    // Process escalations
+    if (aiResponse.escalation) {
+      conversationStore.addEscalation(subscriberId, aiResponse.escalation);
+      await whatsapp.processEscalation(
+        aiResponse.escalation,
+        username || subscriberId,
+        aiResponse.conversation_stage || 'unknown'
       );
-      if (!isValid) {
-        console.warn('[WEBHOOK] Invalid signature');
-        return;
+    }
+
+    // Check message threshold (10+ messages without booking)
+    const updatedConvo = conversationStore.getConversation(subscriberId);
+    if (updatedConvo.messageCount >= 10 && !updatedConvo.calendlySent) {
+      const alreadyAlerted = updatedConvo.escalations.some(
+        e => e.type === 'message_threshold'
+      );
+      if (!alreadyAlerted) {
+        conversationStore.addEscalation(subscriberId, {
+          type: 'message_threshold',
+          reason: `${updatedConvo.messageCount} messages exchanged, no booking yet`,
+        });
+        await whatsapp.alertMessageThreshold(
+          username || subscriberId,
+          updatedConvo.messageCount,
+          `Stage: ${updatedConvo.conversationStage}`
+        );
       }
     }
 
-    // Process Instagram messaging events
-    if (body.object === 'instagram') {
-      for (const entry of body.entry || []) {
-        for (const messaging of entry.messaging || []) {
-          await handleIncomingMessage(messaging, entry.id);
-        }
-      }
-    }
+    // Log to Google Sheets
+    const finalConvo = conversationStore.getConversation(subscriberId);
+    await sheets.logConversation(finalConvo);
 
-    // Also handle page-level messaging (Meta sometimes sends as page)
-    if (body.object === 'page') {
-      for (const entry of body.entry || []) {
-        for (const messaging of entry.messaging || []) {
-          await handleIncomingMessage(messaging, entry.id);
-        }
-      }
-    }
+    console.log(`[MSG] Replied to @${username}: ${aiResponse.message.substring(0, 50)}...`);
+
+    // Return the AI response to ManyChat so it can also be used in the flow
+    // ManyChat can use {{ai_response}} custom field or the response body
+    return res.json({
+      success: true,
+      message: aiResponse.message,
+      conversation_stage: aiResponse.conversation_stage,
+      send_calendly: aiResponse.send_calendly || false,
+    });
+
   } catch (error) {
-    console.error('[WEBHOOK] Error processing:', error.message);
+    console.error('[MANYCHAT WEBHOOK] Error:', error.message);
+    return res.status(500).json({ error: error.message });
   }
 });
-
-// ─── Core message handler ───
-
-async function handleIncomingMessage(messaging, pageId) {
-  // Only process messages (not echoes, reads, etc.)
-  if (!messaging.message || messaging.message.is_echo) return;
-
-  const senderId = messaging.sender.id;
-  const messageText = messaging.message.text;
-  const timestamp = messaging.timestamp;
-
-  if (!messageText) {
-    console.log(`[MSG] Non-text message from ${senderId}, skipping`);
-    return;
-  }
-
-  console.log(`[MSG] Received from ${senderId}: ${messageText}`);
-
-  // Determine which page this is for
-  const pageConfig = getPageByFbId(pageId) || { name: 'charmframes' };
-
-  // Get or fetch creator profile
-  let profile = { username: 'unknown', follower_count: 0, page: pageConfig.name };
-  try {
-    const igProfile = await instagram.getUserProfile(senderId);
-    profile = { ...igProfile, page: pageConfig.name };
-  } catch (e) {
-    console.warn(`[MSG] Could not fetch profile for ${senderId}`);
-  }
-
-  // Set profile in conversation store
-  conversationStore.setProfile(senderId, profile.username, pageConfig.name);
-
-  // Add creator message to conversation history
-  conversationStore.addMessage(senderId, 'creator', messageText);
-
-  // Get full conversation for AI context
-  const conversation = conversationStore.getConversation(senderId);
-
-  // Generate AI response
-  const aiResponse = await ai.generateResponse(conversation.messages, profile);
-
-  if (!aiResponse || !aiResponse.message) {
-    console.error('[MSG] AI returned no message');
-    return;
-  }
-
-  console.log(`[AI] Response for ${senderId}: ${aiResponse.message}`);
-  console.log(`[AI] Stage: ${aiResponse.conversation_stage} | Escalation: ${JSON.stringify(aiResponse.escalation)} | Qualification: ${JSON.stringify(aiResponse.qualification)}`);
-
-  // Send the response on Instagram
-  try {
-    await instagram.sendMessage(senderId, aiResponse.message);
-  } catch (sendError) {
-    console.error(`[MSG] Failed to send IG message to ${senderId}:`, sendError.message);
-    // Continue processing even if send fails (for testing)
-  }
-
-  // Store assistant message
-  conversationStore.addMessage(senderId, 'assistant', aiResponse.message);
-
-  // Update conversation stage
-  if (aiResponse.conversation_stage) {
-    conversationStore.updateStage(senderId, aiResponse.conversation_stage);
-  }
-
-  // Process qualification data
-  if (aiResponse.qualification) {
-    const q = aiResponse.qualification;
-    conversationStore.updateQualification(senderId, q.field, q.value);
-  }
-
-  // Mark if Calendly was sent
-  if (aiResponse.send_calendly) {
-    const convo = conversationStore.getConversation(senderId);
-    convo.calendlySent = true;
-    conversationStore.saveConversation(senderId, convo);
-  }
-
-  // Process escalations
-  if (aiResponse.escalation) {
-    conversationStore.addEscalation(senderId, aiResponse.escalation);
-    await whatsapp.processEscalation(
-      aiResponse.escalation,
-      profile.username || senderId,
-      aiResponse.conversation_stage || 'unknown'
-    );
-  }
-
-  // Check message threshold (10+ messages without booking)
-  const updatedConvo = conversationStore.getConversation(senderId);
-  if (updatedConvo.messageCount >= 10 && !updatedConvo.calendlySent) {
-    // Only alert once
-    const alreadyAlerted = updatedConvo.escalations.some(
-      e => e.type === 'message_threshold'
-    );
-    if (!alreadyAlerted) {
-      conversationStore.addEscalation(senderId, {
-        type: 'message_threshold',
-        reason: `${updatedConvo.messageCount} messages exchanged, no booking yet`,
-      });
-      await whatsapp.alertMessageThreshold(
-        profile.username || senderId,
-        updatedConvo.messageCount,
-        `Stage: ${updatedConvo.conversationStage}`
-      );
-    }
-  }
-
-  // Log to Google Sheets
-  const finalConvo = conversationStore.getConversation(senderId);
-  await sheets.logConversation(finalConvo);
-
-  console.log(`[MSG] Replied to @${profile.username}: ${aiResponse.message.substring(0, 50)}...`);
-}
 
 // ─── Approval webhook (Twilio incoming WhatsApp) ───
 
@@ -244,7 +207,6 @@ app.post('/whatsapp-reply', async (req, res) => {
 
     if (messageBody === 'none') {
       console.log('[APPROVAL] All suggestions rejected');
-      // Clean up pending suggestions
       const fs = require('fs');
       const path = require('path');
       const pendingPath = path.join(__dirname, '../data/pending-suggestions.json');
@@ -273,7 +235,11 @@ app.post('/whatsapp-reply', async (req, res) => {
 
 // Health check
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    mode: 'manychat',
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // View conversation
@@ -340,8 +306,9 @@ async function start() {
   app.listen(PORT, () => {
     console.log(`\n=================================`);
     console.log(`  Only Rising DM System`);
+    console.log(`  Mode: ManyChat Integration`);
     console.log(`  Running on port ${PORT}`);
-    console.log(`  Webhook: /webhook`);
+    console.log(`  ManyChat webhook: /manychat-webhook`);
     console.log(`=================================\n`);
   });
 }
