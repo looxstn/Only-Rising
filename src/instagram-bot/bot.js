@@ -179,17 +179,46 @@ class InstagramBot {
         await this.humanDelay(5000, 8000);
       }
 
-      // SCREEN 1: "Continue as" screen
-      const continueBtn = await this.page.$('button:has-text("Continue"), div[role="button"]:has-text("Continue"), a:has-text("Continue")');
-      if (continueBtn) {
-        console.log('[BOT] Found "Continue as" screen, clicking...');
-        await continueBtn.click();
-        await this.humanDelay(5000, 8000);
-        await this.page.waitForNavigation({ timeout: 15000 }).catch(() => {});
-        await this.humanDelay(3000, 5000);
+      // Use JavaScript to detect and click elements (more reliable than Playwright selectors)
+      const screenAction = await this.page.evaluate(() => {
+        // Check all buttons and links for "Continue"
+        const allClickables = [...document.querySelectorAll('button, a, div[role="button"]')];
+        for (const el of allClickables) {
+          const text = el.textContent?.trim();
+          if (text === 'Continue' || text === 'Log in' || text === 'Log In') {
+            el.click();
+            return `clicked: ${text}`;
+          }
+        }
 
+        // Check for cookie buttons
+        for (const el of allClickables) {
+          const text = el.textContent?.trim().toLowerCase();
+          if (text?.includes('allow') && text?.includes('cookies')) {
+            el.click();
+            return `clicked cookie: ${el.textContent?.trim()?.substring(0, 30)}`;
+          }
+          if (text === 'accept' || text === 'accept all') {
+            el.click();
+            return `clicked: ${text}`;
+          }
+        }
+
+        // Check if login form is present
+        const inputs = document.querySelectorAll('input');
+        if (inputs.length >= 2) {
+          return 'login_form_found';
+        }
+
+        return `nothing_found (${allClickables.length} clickables, ${inputs.length} inputs)`;
+      });
+
+      console.log(`[BOT] Screen action: ${screenAction}`);
+
+      if (screenAction.startsWith('clicked')) {
+        await this.humanDelay(5000, 8000);
         if (await this.isLoggedIn()) {
-          console.log('[BOT] Logged in via Continue');
+          console.log('[BOT] Logged in after clicking');
           await this.dismissPopups();
           await this.saveSession();
           return true;
@@ -197,23 +226,12 @@ class InstagramBot {
         continue;
       }
 
-      // SCREEN 2: Cookie consent popup
-      const cookieBtn = await this.page.$('button:has-text("Allow all cookies"), button:has-text("Allow essential and optional cookies"), button:has-text("Accept"), button:has-text("Only allow essential cookies")');
-      if (cookieBtn) {
-        console.log('[BOT] Dismissing cookie popup...');
-        await cookieBtn.click();
-        await this.humanDelay(2000, 3000);
-        continue; // Re-check what's behind it
+      if (screenAction === 'login_form_found') {
+        console.log('[BOT] Login form detected');
+        break;
       }
 
-      // SCREEN 3: Login form
-      const loginInput = await this.page.$('input[type="text"], input[name="username"], input[name="email"]');
-      if (loginInput) {
-        console.log('[BOT] Found login form, entering credentials...');
-        break; // Exit loop and proceed to credential entry
-      }
-
-      // SCREEN 4: Not on login page yet
+      // Not on login page - navigate there
       if (!currentUrl.includes('accounts/login')) {
         console.log('[BOT] Navigating to login page...');
         await this.page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
@@ -221,7 +239,6 @@ class InstagramBot {
         continue;
       }
 
-      // Nothing found, wait and retry
       console.log('[BOT] Page not ready, waiting...');
       await this.humanDelay(5000, 8000);
     }
