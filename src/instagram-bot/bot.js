@@ -453,26 +453,32 @@ class InstagramBot {
   }
 
   // ─── Use Instagram's internal API via the authenticated browser ───
-  // Requires correct headers to get JSON instead of HTML
-
-  _apiHeaders() {
-    return {
-      'X-Requested-With': 'XMLHttpRequest',
-      'X-IG-App-ID': '936619743392459',
-      'X-ASBD-ID': '129477',
-      'X-IG-WWW-Claim': 'hmac.AR3W0DThY2Mu5Fag4sQynIrq0OaGrR1IMjjNhNS0ebAi5Q5Y',
-      'Accept': '*/*',
-    };
-  }
+  // Intercept network to get correct headers, or use page context fetch
 
   async _apiCall(endpoint, method = 'GET', body = null) {
     try {
-      const args = { url: endpoint, method, body, headers: this._apiHeaders() };
+      const args = { url: endpoint, method, body };
       const result = await this.page.evaluate(async (a) => {
+        // Extract all required tokens from the page context
         const csrfToken = document.cookie.match(/csrftoken=([^;]+)/)?.[1] || '';
+        // Get the claim token from Instagram's shared data
+        let wwwClaim = '0';
+        try {
+          const sd = window._sharedData || window.__initialData;
+          if (sd) wwwClaim = sd.config?.viewerId ? 'hmac.' + sd.config.viewerId : '0';
+        } catch {}
+
         const headers = {
-          ...a.headers,
           'X-CSRFToken': csrfToken,
+          'X-Requested-With': 'XMLHttpRequest',
+          'X-IG-App-ID': '936619743392459',
+          'X-IG-WWW-Claim': wwwClaim,
+          'X-ASBD-ID': '129477',
+          'Accept': '*/*',
+          'Sec-Fetch-Site': 'same-origin',
+          'Sec-Fetch-Mode': 'cors',
+          'Sec-Fetch-Dest': 'empty',
+          'Referer': 'https://www.instagram.com/direct/inbox/',
         };
         if (a.body) headers['Content-Type'] = 'application/x-www-form-urlencoded';
 
@@ -480,16 +486,19 @@ class InstagramBot {
         if (a.body) opts.body = a.body;
 
         const res = await fetch('https://www.instagram.com' + a.url, opts);
+        const contentType = res.headers.get('content-type') || '';
         const text = await res.text();
+
+        // Debug: return first bit of response if not JSON
         try {
-          return { ok: true, data: JSON.parse(text), status: res.status };
+          return { ok: true, data: JSON.parse(text), status: res.status, contentType };
         } catch {
-          return { ok: false, text: text.substring(0, 300), status: res.status };
+          return { ok: false, text: text.substring(0, 200), status: res.status, contentType };
         }
       }, args);
 
       if (!result.ok) {
-        console.error(`[BOT] API ${endpoint} returned non-JSON (status ${result.status}): ${result.text.substring(0, 100)}`);
+        console.error(`[BOT] API ${endpoint} status=${result.status} type=${result.contentType} body=${result.text.substring(0, 80)}`);
         return null;
       }
       return result.data;
@@ -497,6 +506,38 @@ class InstagramBot {
       console.error(`[BOT] API ${endpoint} error:`, e.message);
       return null;
     }
+  }
+
+  // Alternative: intercept inbox data by navigating to the inbox page
+  // and capturing the XHR responses Instagram makes
+  async getInboxViaIntercept() {
+    return new Promise(async (resolve) => {
+      let inboxData = null;
+      const handler = async (response) => {
+        const url = response.url();
+        if (url.includes('/api/v1/direct_v2/inbox/') || url.includes('direct_v2/inbox')) {
+          try {
+            const json = await response.json();
+            if (json?.inbox?.threads) inboxData = json;
+          } catch {}
+        }
+      };
+
+      this.page.on('response', handler);
+
+      // Navigate to inbox to trigger Instagram's own API calls
+      await this.page.goto('https://www.instagram.com/direct/inbox/', { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+      await this.humanDelay(3000, 5000);
+
+      this.page.off('response', handler);
+
+      if (inboxData) {
+        console.log(`[BOT] Intercepted inbox: ${inboxData.inbox.threads.length} threads`);
+      } else {
+        console.log('[BOT] No inbox data intercepted from page load');
+      }
+      resolve(inboxData);
+    });
   }
 
   async apiGetInbox() {
@@ -546,17 +587,15 @@ class InstagramBot {
   }
 
   async getUnreadConversations() {
-    // Make sure we're on Instagram so API calls work with cookies
-    const currentUrl = this.page.url();
-    if (!currentUrl.includes('instagram.com')) {
-      await this.goToInbox();
-    }
-
     const unreadConvos = [];
 
     try {
-      // Check main inbox
-      const inbox = await this.apiGetInbox();
+      // Try direct API first, fall back to intercept
+      let inbox = await this.apiGetInbox();
+      if (!inbox?.inbox?.threads) {
+        console.log('[BOT] Direct API failed, trying intercept method...');
+        inbox = await this.getInboxViaIntercept();
+      }
       if (inbox?.inbox?.threads) {
         for (const thread of inbox.inbox.threads) {
           const lastItem = thread.items?.[0];
