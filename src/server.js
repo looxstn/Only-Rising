@@ -250,6 +250,35 @@ app.post('/bot/2fa', (req, res) => {
   }
 });
 
+// Debug: see what the bot's browser is showing
+app.get('/bot/screenshot', async (req, res) => {
+  if (!global.igBot || !global.igBot.page) {
+    return res.status(400).json({ error: 'Bot not running' });
+  }
+  try {
+    const screenshot = await global.igBot.page.screenshot({ fullPage: false });
+    res.set('Content-Type', 'image/png');
+    res.send(screenshot);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Debug: get current page info
+app.get('/bot/status', async (req, res) => {
+  if (!global.igBot || !global.igBot.page) {
+    return res.status(400).json({ error: 'Bot not running' });
+  }
+  try {
+    const url = global.igBot.page.url();
+    const title = await global.igBot.page.title();
+    const html = await global.igBot.page.content();
+    res.json({ url, title, htmlLength: html.length, waitingFor2FA: global.igBot.waitingFor2FA });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Simple 2FA form page
 app.get('/bot/2fa', (req, res) => {
   res.send(`
@@ -453,10 +482,10 @@ async function start() {
       const loggedIn = await bot.login();
 
       if (loggedIn) {
-        // Start polling for new DMs every 10-15 seconds
-        bot.startPolling(10000);
+        bot.startPolling(15000);
       } else {
-        console.error('[BOT] Could not login. Bot will not run.');
+        console.error('[BOT] Could not login. Check /bot/screenshot to see what the page looks like.');
+        console.error('[BOT] Bot page still accessible for debugging.');
       }
     } catch (error) {
       console.error('[BOT] Failed to start:', error.message);

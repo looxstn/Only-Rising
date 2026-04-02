@@ -130,9 +130,11 @@ class InstagramBot {
   }
 
   async login() {
-    console.log('[BOT] Navigating to Instagram...');
-    await this.page.goto('https://www.instagram.com/', { waitUntil: 'domcontentloaded' });
+    console.log('[BOT] Navigating to Instagram login page...');
+    await this.page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
     await this.humanDelay(3000, 5000);
+    console.log('[BOT] Page loaded, URL: ' + this.page.url());
+    console.log('[BOT] Page title: ' + await this.page.title());
 
     // Check if already logged in
     const loggedIn = await this.isLoggedIn();
