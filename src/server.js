@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const cron = require('node-cron');
 
 const ManyChatAPI = require('./manychat/api');
+const InstagramBot = require('./instagram-bot/bot');
 const ConversationEngine = require('./ai/conversation-engine');
 const conversationStore = require('./conversations/store');
 const WhatsAppAlerts = require('./alerts/whatsapp');
@@ -240,7 +241,8 @@ app.post('/whatsapp-reply', async (req, res) => {
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
-    mode: 'manychat',
+    mode: process.env.IG_BOT_USERNAME ? 'browser-bot' : 'manychat',
+    botRunning: !!global.igBot?.isRunning,
     timestamp: new Date().toISOString(),
   });
 });
@@ -300,6 +302,89 @@ cron.schedule('0 9 * * 1', async () => {
   }
 });
 
+// ─── Instagram Bot message handler ───
+
+async function handleBotMessage(senderId, senderUsername, messageText) {
+  const profile = {
+    username: senderUsername,
+    follower_count: 0,
+    page: 'charmframes',
+  };
+
+  // Set profile in conversation store
+  conversationStore.setProfile(senderId, senderUsername, 'charmframes');
+
+  // Add creator message to conversation history
+  conversationStore.addMessage(senderId, 'creator', messageText);
+
+  // Get full conversation for AI context
+  const conversation = conversationStore.getConversation(senderId);
+
+  // Generate AI response
+  const aiResponse = await ai.generateResponse(conversation.messages, profile);
+
+  if (!aiResponse || !aiResponse.message) {
+    console.error('[BOT] AI returned no message');
+    return null;
+  }
+
+  console.log(`[BOT AI] Response for @${senderUsername}: ${aiResponse.message}`);
+  console.log(`[BOT AI] Stage: ${aiResponse.conversation_stage} | Escalation: ${JSON.stringify(aiResponse.escalation)}`);
+
+  // Store assistant message
+  conversationStore.addMessage(senderId, 'assistant', aiResponse.message);
+
+  // Update conversation stage
+  if (aiResponse.conversation_stage) {
+    conversationStore.updateStage(senderId, aiResponse.conversation_stage);
+  }
+
+  // Process qualification data
+  if (aiResponse.qualification) {
+    conversationStore.updateQualification(senderId, aiResponse.qualification.field, aiResponse.qualification.value);
+  }
+
+  // Mark if Calendly was sent
+  if (aiResponse.send_calendly) {
+    const convo = conversationStore.getConversation(senderId);
+    convo.calendlySent = true;
+    conversationStore.saveConversation(senderId, convo);
+  }
+
+  // Process escalations
+  if (aiResponse.escalation) {
+    conversationStore.addEscalation(senderId, aiResponse.escalation);
+    await whatsapp.processEscalation(
+      aiResponse.escalation,
+      senderUsername || senderId,
+      aiResponse.conversation_stage || 'unknown'
+    );
+  }
+
+  // Check message threshold
+  const updatedConvo = conversationStore.getConversation(senderId);
+  if (updatedConvo.messageCount >= 10 && !updatedConvo.calendlySent) {
+    const alreadyAlerted = updatedConvo.escalations.some(e => e.type === 'message_threshold');
+    if (!alreadyAlerted) {
+      conversationStore.addEscalation(senderId, {
+        type: 'message_threshold',
+        reason: `${updatedConvo.messageCount} messages exchanged, no booking yet`,
+      });
+      await whatsapp.alertMessageThreshold(
+        senderUsername || senderId,
+        updatedConvo.messageCount,
+        `Stage: ${updatedConvo.conversationStage}`
+      );
+    }
+  }
+
+  // Log to Google Sheets
+  const finalConvo = conversationStore.getConversation(senderId);
+  await sheets.logConversation(finalConvo);
+
+  return aiResponse.message;
+}
+
 // ─── Start server ───
 
 async function start() {
@@ -307,13 +392,40 @@ async function start() {
   await sheets.init();
 
   app.listen(PORT, () => {
+    const mode = process.env.IG_BOT_USERNAME ? 'Browser Bot' : 'ManyChat';
     console.log(`\n=================================`);
     console.log(`  Only Rising DM System`);
-    console.log(`  Mode: ManyChat Integration`);
+    console.log(`  Mode: ${mode}`);
     console.log(`  Running on port ${PORT}`);
-    console.log(`  ManyChat webhook: /manychat-webhook`);
     console.log(`=================================\n`);
   });
+
+  // Start Instagram browser bot if credentials are configured
+  if (process.env.IG_BOT_USERNAME && process.env.IG_BOT_PASSWORD) {
+    console.log('[BOT] Instagram bot credentials found, starting bot...');
+
+    const bot = new InstagramBot({
+      username: process.env.IG_BOT_USERNAME,
+      password: process.env.IG_BOT_PASSWORD,
+      onMessage: handleBotMessage,
+    });
+
+    global.igBot = bot;
+
+    try {
+      await bot.init();
+      const loggedIn = await bot.login();
+
+      if (loggedIn) {
+        // Start polling for new DMs every 10-15 seconds
+        bot.startPolling(10000);
+      } else {
+        console.error('[BOT] Could not login. Bot will not run.');
+      }
+    } catch (error) {
+      console.error('[BOT] Failed to start:', error.message);
+    }
+  }
 }
 
 start();
