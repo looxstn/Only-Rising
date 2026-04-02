@@ -389,15 +389,12 @@ class InstagramBot {
   }
 
   async goToInbox() {
-    const currentUrl = this.page.url();
-    if (!currentUrl.includes('/direct/inbox') && !currentUrl.includes('/direct/t/')) {
-      console.log('[BOT] Navigating to DM inbox...');
-      await this.page.goto('https://www.instagram.com/direct/inbox/', {
-        waitUntil: 'domcontentloaded',
-      });
-      await this.humanDelay(2000, 4000);
-      await this.dismissPopups();
-    }
+    console.log('[BOT] Navigating to DM inbox...');
+    await this.page.goto('https://www.instagram.com/direct/inbox/', {
+      waitUntil: 'domcontentloaded',
+    });
+    await this.humanDelay(2000, 4000);
+    await this.dismissPopups();
   }
 
   async getUnreadConversations() {
@@ -420,31 +417,45 @@ class InstagramBot {
       }
 
       const convoLinks = await this.page.$$('a[href*="/direct/t/"]');
+      console.log(`[BOT] Found ${convoLinks.length} conversations in inbox`);
 
       for (const link of convoLinks) {
         try {
+          const href = await link.getAttribute('href');
+          const threadId = href.match(/\/direct\/t\/(\d+)/)?.[1];
+
           const parent = await link.evaluateHandle(el => el.closest('div[role="listitem"]') || el.parentElement?.parentElement);
-          const hasUnread = await parent.evaluate(el => {
+          const debugInfo = await parent.evaluate(el => {
             const spans = el.querySelectorAll('span');
+            let hasBold = false;
+            let fontWeights = [];
             for (const span of spans) {
               const style = window.getComputedStyle(span);
+              fontWeights.push(style.fontWeight);
               if (style.fontWeight === '600' || style.fontWeight === '700' || style.fontWeight === 'bold') {
-                return true;
+                hasBold = true;
               }
             }
             const dots = el.querySelectorAll('div[style*="background-color: rgb(0, 149, 246)"], div[class*="blue"]');
-            if (dots.length > 0) return true;
-            return false;
+            return {
+              hasBold,
+              hasDots: dots.length > 0,
+              fontWeights: fontWeights.slice(0, 5).join(','),
+              text: el.textContent?.substring(0, 80) || ''
+            };
           });
 
+          const hasUnread = debugInfo.hasBold || debugInfo.hasDots;
+          console.log(`[BOT] Thread ${threadId}: unread=${hasUnread} (bold=${debugInfo.hasBold}, dots=${debugInfo.hasDots}, weights=${debugInfo.fontWeights}, text="${debugInfo.text.substring(0, 40)}")`);
+
           if (hasUnread) {
-            const href = await link.getAttribute('href');
-            const threadId = href.match(/\/direct\/t\/(\d+)/)?.[1];
             if (threadId) {
               unreadConvos.push({ element: link, threadId, href });
             }
           }
-        } catch {}
+        } catch (e) {
+          console.log(`[BOT] Error checking conversation: ${e.message}`);
+        }
       }
     } catch (error) {
       console.error('[BOT] Error scanning inbox:', error.message);
@@ -634,6 +645,7 @@ class InstagramBot {
     const unread = await this.getUnreadConversations();
 
     if (unread.length === 0) {
+      console.log('[BOT] No unread conversations found');
       return;
     }
 
