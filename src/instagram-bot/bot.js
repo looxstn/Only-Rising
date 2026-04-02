@@ -228,22 +228,28 @@ class InstagramBot {
       // Check for 2FA - look for various verification inputs
       const twoFactorInput = await this.page.$('input[name="verificationCode"], input[name="security_code"], input[aria-label*="Security code"], input[aria-label*="Confirmation code"], input[placeholder*="code" i]');
       if (twoFactorInput) {
-        // Grab the page text to figure out what type of 2FA it's asking for
+        // Grab the MAIN heading/description text to figure out what type of 2FA
+        // Important: check the primary instruction, not alternative links at the bottom
         let twoFactorType = 'unknown';
         try {
           const pageText = await this.page.evaluate(() => document.body.innerText);
-          if (pageText.includes('authentication app') || pageText.includes('authenticator')) {
-            twoFactorType = 'authenticator_app';
-          } else if (pageText.includes('text') || pageText.includes('SMS') || pageText.includes('phone')) {
-            twoFactorType = 'sms';
-          } else if (pageText.includes('email')) {
-            twoFactorType = 'email';
-          } else if (pageText.includes('WhatsApp')) {
-            twoFactorType = 'whatsapp';
-          }
-          // Log the full 2FA page text for debugging
+          // Log for debugging
           const relevantText = pageText.substring(0, 500).replace(/\n+/g, ' | ');
           console.log(`[BOT] 2FA page text: ${relevantText}`);
+
+          // Get just the main heading/instruction (first ~200 chars before alternatives)
+          const mainText = pageText.substring(0, 200).toLowerCase();
+
+          // Check SMS first - "we sent via SMS" or "sent to your mobile" is the primary instruction
+          if (mainText.includes('sms') || mainText.includes('sent to your mobile') || mainText.includes('text message') || mainText.includes('we sent via')) {
+            twoFactorType = 'sms';
+          } else if (mainText.includes('authentication app') || mainText.includes('authenticator')) {
+            twoFactorType = 'authenticator_app';
+          } else if (mainText.includes('email')) {
+            twoFactorType = 'email';
+          } else if (mainText.includes('whatsapp')) {
+            twoFactorType = 'whatsapp';
+          }
         } catch {}
 
         console.log(`[BOT] 2FA required (type: ${twoFactorType}). Waiting for code...`);
