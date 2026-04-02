@@ -113,13 +113,16 @@ app.post('/manychat-webhook', async (req, res) => {
     console.log(`[AI] Response for ${subscriberId} (@${username}): ${aiResponse.message}`);
     console.log(`[AI] Stage: ${aiResponse.conversation_stage} | Escalation: ${JSON.stringify(aiResponse.escalation)} | Qualification: ${JSON.stringify(aiResponse.qualification)}`);
 
-    // Send the response back via ManyChat
-    try {
-      await manychat.sendMessage(subscriberId, aiResponse.message);
-    } catch (sendError) {
-      console.error(`[MSG] Failed to send ManyChat message to ${subscriberId}:`, sendError.message);
-      // Still return the message so ManyChat can use it in the flow as fallback
-    }
+    // Simulate human typing delay based on message length
+    // ~40-60 words per minute typing speed, plus reading time
+    const messageLength = aiResponse.message.length;
+    const readingDelay = Math.min(messageText.length * 50, 3000); // time to "read" their message
+    const typingDelay = Math.min(messageLength * 30, 6000); // time to "type" the reply
+    const randomJitter = Math.floor(Math.random() * 2000) + 1000; // 1-3s random variation
+    const totalDelay = Math.min(readingDelay + typingDelay + randomJitter, 8000); // cap at 8s to avoid ManyChat timeout
+
+    console.log(`[TYPING] Simulating ${totalDelay}ms delay for natural feel`);
+    await new Promise(resolve => setTimeout(resolve, totalDelay));
 
     // Store assistant message
     conversationStore.addMessage(subscriberId, 'assistant', aiResponse.message);
