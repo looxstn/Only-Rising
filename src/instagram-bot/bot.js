@@ -95,10 +95,23 @@ class InstagramBot {
       deviceScaleFactor: Math.random() > 0.5 ? 2 : 1,
     };
 
-    // Load saved session if available
+    // Load saved session - try file first, then env var fallback
     if (fs.existsSync(SESSION_PATH)) {
-      console.log('[BOT] Loading saved session...');
+      console.log('[BOT] Loading saved session from file...');
       contextOptions.storageState = SESSION_PATH;
+    } else if (process.env.IG_SESSION_DATA) {
+      console.log('[BOT] Loading saved session from env var...');
+      try {
+        const sessionData = JSON.parse(Buffer.from(process.env.IG_SESSION_DATA, 'base64').toString());
+        const dir = path.dirname(SESSION_PATH);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(SESSION_PATH, JSON.stringify(sessionData));
+        contextOptions.storageState = SESSION_PATH;
+      } catch (e) {
+        console.error('[BOT] Failed to load session from env:', e.message);
+      }
+    } else {
+      console.log('[BOT] No saved session found - will need to login fresh');
     }
 
     this.context = await this.browser.newContext(contextOptions);
@@ -130,20 +143,28 @@ class InstagramBot {
   }
 
   async login() {
-    console.log('[BOT] Navigating to Instagram login page...');
-    await this.page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+    // First check if we have a saved session that's still valid
+    // Navigate to homepage (not login page) to test cookies
+    console.log('[BOT] Checking if session is still valid...');
+    console.log('[BOT] Session file exists: ' + fs.existsSync(SESSION_PATH));
+    await this.page.goto('https://www.instagram.com/', { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
     await this.humanDelay(3000, 5000);
     console.log('[BOT] Page loaded, URL: ' + this.page.url());
-    console.log('[BOT] Page title: ' + await this.page.title());
 
-    // Check if already logged in
+    // Check if already logged in from cookies
     const loggedIn = await this.isLoggedIn();
     if (loggedIn) {
-      console.log('[BOT] Already logged in from saved session');
+      console.log('[BOT] Already logged in from saved session - no login needed');
       await this.dismissPopups();
       await this.saveSession();
       return true;
     }
+
+    console.log('[BOT] Session expired or not found, doing full login...');
+    console.log('[BOT] Navigating to login page...');
+    await this.page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+    await this.humanDelay(2000, 4000);
+    console.log('[BOT] Login page URL: ' + this.page.url());
 
     console.log('[BOT] Logging in as @' + this.username + '...');
 
@@ -384,8 +405,26 @@ class InstagramBot {
     const dir = path.dirname(SESSION_PATH);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const state = await this.context.storageState();
-    fs.writeFileSync(SESSION_PATH, JSON.stringify(state));
-    console.log('[BOT] Session saved');
+    const stateJson = JSON.stringify(state);
+    fs.writeFileSync(SESSION_PATH, stateJson);
+
+    // Also save to env var via Railway API so it survives deploys
+    if (process.env.RAILWAY_PROJECT_ID && process.env.RAILWAY_API_TOKEN) {
+      try {
+        const base64Session = Buffer.from(stateJson).toString('base64');
+        const axios = require('axios');
+        await axios.post('https://backboard.railway.app/graphql/v2', {
+          query: `mutation { variableUpsert(input: { projectId: "${process.env.RAILWAY_PROJECT_ID}", environmentId: "${process.env.RAILWAY_ENVIRONMENT_ID}", serviceId: "${process.env.RAILWAY_SERVICE_ID}", name: "IG_SESSION_DATA", value: "${base64Session}" }) }`,
+        }, {
+          headers: { Authorization: `Bearer ${process.env.RAILWAY_API_TOKEN}` },
+        });
+        console.log('[BOT] Session saved to Railway env var');
+      } catch (e) {
+        console.log('[BOT] Could not save session to Railway env (non-critical):', e.message);
+      }
+    }
+
+    console.log('[BOT] Session saved to file');
   }
 
   async goToInbox() {
