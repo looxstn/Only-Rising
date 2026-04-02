@@ -225,14 +225,32 @@ class InstagramBot {
       await this.page.waitForNavigation({ timeout: 30000 }).catch(() => {});
       await this.humanDelay(3000, 5000);
 
-      // Check for 2FA
-      const twoFactorInput = await this.page.$('input[name="verificationCode"]');
+      // Check for 2FA - look for various verification inputs
+      const twoFactorInput = await this.page.$('input[name="verificationCode"], input[name="security_code"], input[aria-label*="Security code"], input[aria-label*="Confirmation code"], input[placeholder*="code" i]');
       if (twoFactorInput) {
-        console.log('[BOT] 2FA required. Waiting for code...');
+        // Grab the page text to figure out what type of 2FA it's asking for
+        let twoFactorType = 'unknown';
+        try {
+          const pageText = await this.page.evaluate(() => document.body.innerText);
+          if (pageText.includes('authentication app') || pageText.includes('authenticator')) {
+            twoFactorType = 'authenticator_app';
+          } else if (pageText.includes('text') || pageText.includes('SMS') || pageText.includes('phone')) {
+            twoFactorType = 'sms';
+          } else if (pageText.includes('email')) {
+            twoFactorType = 'email';
+          } else if (pageText.includes('WhatsApp')) {
+            twoFactorType = 'whatsapp';
+          }
+          // Log the full 2FA page text for debugging
+          const relevantText = pageText.substring(0, 500).replace(/\n+/g, ' | ');
+          console.log(`[BOT] 2FA page text: ${relevantText}`);
+        } catch {}
+
+        console.log(`[BOT] 2FA required (type: ${twoFactorType}). Waiting for code...`);
         this.waitingFor2FA = true;
 
         if (this.onTwoFactorNeeded) {
-          await this.onTwoFactorNeeded();
+          await this.onTwoFactorNeeded(twoFactorType);
         }
 
         const maxWait = 300000;
@@ -251,7 +269,10 @@ class InstagramBot {
         }
 
         console.log('[BOT] 2FA code received, entering...');
-        await this.humanType('input[name="verificationCode"]', this.twoFactorCode);
+        // Click the 2FA input and type the code
+        await twoFactorInput.click();
+        await this.humanDelay(300, 600);
+        await this.page.keyboard.type(this.twoFactorCode, { delay: Math.floor(Math.random() * 60) + 40 });
         await this.humanDelay(500, 1000);
 
         const confirmBtn = await this.page.$('button:has-text("Confirm"), button[type="button"]:not([aria-label])');

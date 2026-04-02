@@ -466,12 +466,26 @@ async function start() {
       username: process.env.IG_BOT_USERNAME,
       password: process.env.IG_BOT_PASSWORD,
       onMessage: handleBotMessage,
-      onTwoFactorNeeded: async () => {
+      onTwoFactorNeeded: async (twoFactorType) => {
         const serverUrl = process.env.RAILWAY_PUBLIC_DOMAIN
           ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
           : `https://web-production-30bf0.up.railway.app`;
+
+        let typeMsg = '';
+        if (twoFactorType === 'authenticator_app') {
+          typeMsg = '🔐 Instagram wants a code from your AUTHENTICATOR APP (Google Auth / Duo etc)';
+        } else if (twoFactorType === 'sms') {
+          typeMsg = '📱 Instagram sent an SMS code to your phone';
+        } else if (twoFactorType === 'email') {
+          typeMsg = '📧 Instagram sent a code to your email';
+        } else if (twoFactorType === 'whatsapp') {
+          typeMsg = '💬 Instagram sent a code via WhatsApp';
+        } else {
+          typeMsg = '🔑 Check your phone/email/authenticator app for the code';
+        }
+
         await whatsapp.sendAlert(
-          `Only Rising Bot needs your 2FA code to login to Instagram.\n\nGo here to enter it:\n${serverUrl}/bot/2fa\n\nYou have 5 minutes.`
+          `Only Rising Bot needs your 2FA code to login to @${process.env.IG_BOT_USERNAME}.\n\n${typeMsg}\n\nEnter it here:\n${serverUrl}/bot/2fa\n\nYou can also check what the page looks like:\n${serverUrl}/bot/screenshot\n\nYou have 5 minutes.`
         );
       },
     });
