@@ -1,0 +1,6 @@
+node_modules/
+data/
+prompts/system-prompt.backup.*.md
+ngrok
+.env
+.DS_Store

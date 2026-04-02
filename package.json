@@ -1,0 +1,26 @@
+{
+  "name": "only-rising",
+  "version": "1.0.0",
+  "description": "",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "import-convos": "node scripts/import-conversation.js",
+    "weekly-analysis": "node -e \"require('./src/server.js')\" --run-analysis"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.82.0",
+    "axios": "^1.14.0",
+    "dotenv": "^17.4.0",
+    "express": "^5.2.1",
+    "google-auth-library": "^10.6.2",
+    "googleapis": "^171.4.0",
+    "node-cron": "^4.2.1",
+    "twilio": "^5.13.1"
+  }
+}
