@@ -680,22 +680,39 @@ setInterval(poll, 3000);
 });
 
 app.get('/bot/retry-login', async (req, res) => {
-  if (!global.igBot) {
-    return res.status(400).json({ error: 'Bot not initialized' });
-  }
   try {
     console.log('[BOT] Retrying login...');
-    // Close old browser and start fresh
-    await global.igBot.stop().catch(() => {});
-    await global.igBot.init();
-    const loggedIn = await global.igBot.login();
+    // Create a completely fresh bot instance
+    if (global.igBot) {
+      await global.igBot.stop().catch(() => {});
+      global.igBot = null;
+    }
+    // Wait a moment for cleanup
+    await new Promise(r => setTimeout(r, 2000));
+
+    const bot = new (require('./instagram-bot/bot'))({
+      username: process.env.IG_BOT_USERNAME,
+      password: process.env.IG_BOT_PASSWORD,
+      onMessage: handleBotMessage,
+      onTwoFactorNeeded: async (twoFactorType) => {
+        const serverUrl = process.env.RAILWAY_PUBLIC_DOMAIN
+          ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+          : `https://web-production-30bf0.up.railway.app`;
+        let typeMsg = twoFactorType === 'sms' ? '📱 SMS code' : twoFactorType === 'authenticator_app' ? '🔐 Authenticator app' : '🔑 Check phone/email/auth app';
+        await whatsapp.sendAlert(`2FA needed for @${process.env.IG_BOT_USERNAME}.\n${typeMsg}\n\nEnter here: ${serverUrl}/bot/2fa\n\n5 minutes.`);
+      },
+    });
+    global.igBot = bot;
+    await bot.init();
+    const loggedIn = await bot.login();
     if (loggedIn) {
-      global.igBot.startPolling(15000);
+      bot.startPolling(15000);
       res.json({ success: true, message: 'Login successful, bot is now monitoring DMs' });
     } else {
       res.json({ success: false, message: 'Login failed. Check /bot/screenshot for details' });
     }
   } catch (error) {
+    console.error('[BOT] Retry error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
