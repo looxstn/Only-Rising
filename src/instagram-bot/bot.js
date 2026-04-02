@@ -162,23 +162,53 @@ class InstagramBot {
       console.log('[BOT] Current URL: ' + this.page.url());
       console.log('[BOT] Waiting for login form...');
 
-      // Try multiple selectors for the login form
-      await this.page.waitForSelector('input[name="username"], input[aria-label="Phone number, username, or email"], form[id="loginForm"] input', { timeout: 20000 });
+      // Find the username/email input using multiple strategies
+      console.log('[BOT] Looking for login fields...');
 
-      const usernameInput = await this.page.$('input[name="username"]') || await this.page.$('input[aria-label="Phone number, username, or email"]');
-      if (!usernameInput) {
-        console.error('[BOT] Could not find username input');
+      // Wait for any input field on the page
+      await this.page.waitForSelector('input', { timeout: 20000 });
+
+      // Get all input fields and find the right ones
+      const inputs = await this.page.$$('input');
+      console.log(`[BOT] Found ${inputs.length} input fields`);
+
+      let usernameInput = null;
+      let passwordInput = null;
+
+      for (const input of inputs) {
+        const type = await input.getAttribute('type');
+        const name = await input.getAttribute('name');
+        const ariaLabel = await input.getAttribute('aria-label');
+        const placeholder = await input.getAttribute('placeholder');
+        console.log(`[BOT] Input: type=${type}, name=${name}, aria-label=${ariaLabel}, placeholder=${placeholder}`);
+
+        if (type === 'password' || name === 'password') {
+          passwordInput = input;
+        } else if (name === 'username' || (ariaLabel && ariaLabel.toLowerCase().includes('username')) ||
+                   (ariaLabel && ariaLabel.toLowerCase().includes('phone')) ||
+                   (ariaLabel && ariaLabel.toLowerCase().includes('email')) ||
+                   (placeholder && placeholder.toLowerCase().includes('username')) ||
+                   (placeholder && placeholder.toLowerCase().includes('phone')) ||
+                   type === 'text') {
+          if (!usernameInput) usernameInput = input;
+        }
+      }
+
+      if (!usernameInput || !passwordInput) {
+        console.error('[BOT] Could not find login fields. Username:', !!usernameInput, 'Password:', !!passwordInput);
         return false;
       }
 
-      // Click the field first, wait, then type slowly like a real person
+      console.log('[BOT] Found login fields, entering credentials...');
+
+      // Click and type username
       await usernameInput.click();
       await this.humanDelay(400, 800);
       await this.page.keyboard.type(this.username, { delay: Math.floor(Math.random() * 80) + 40 });
       await this.humanDelay(600, 1200);
 
-      // Tab to password field like a human would
-      await this.page.keyboard.press('Tab');
+      // Click and type password
+      await passwordInput.click();
       await this.humanDelay(300, 700);
       await this.page.keyboard.type(this.password, { delay: Math.floor(Math.random() * 80) + 40 });
       await this.humanDelay(1000, 2000);
