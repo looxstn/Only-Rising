@@ -9,8 +9,8 @@ class InstagramBot {
   constructor({ username, password, onMessage, onTwoFactorNeeded }) {
     this.username = username;
     this.password = password;
-    this.onMessage = onMessage; // async callback(senderId, senderUsername, messageText)
-    this.onTwoFactorNeeded = onTwoFactorNeeded; // async callback() - notify that 2FA is needed
+    this.onMessage = onMessage;
+    this.onTwoFactorNeeded = onTwoFactorNeeded;
     this.browser = null;
     this.context = null;
     this.page = null;
@@ -18,6 +18,8 @@ class InstagramBot {
     this.waitingFor2FA = false;
     this.twoFactorCode = null;
     this.processedMessages = this.loadProcessed();
+    this.messageCount = 0; // track messages this session for rate limiting
+    this.sessionStart = Date.now();
   }
 
   loadProcessed() {
@@ -33,9 +35,27 @@ class InstagramBot {
   saveProcessed() {
     const dir = path.dirname(PROCESSED_PATH);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    // Only keep last 5000 message IDs to prevent file bloat
     const arr = [...this.processedMessages].slice(-5000);
     fs.writeFileSync(PROCESSED_PATH, JSON.stringify(arr));
+  }
+
+  // ─── Anti-detection: check if we should be "active" right now ───
+  // Simulates a real person who isn't online 24/7
+  isActiveHours() {
+    const hour = new Date().getUTCHours();
+    // Active roughly 8am-11pm UTC (adjust based on your timezone)
+    // Add some randomness so it's not exact
+    const activeStart = 7 + Math.floor(Math.random() * 2); // 7-8am
+    const activeEnd = 22 + Math.floor(Math.random() * 2); // 22-23pm
+    return hour >= activeStart && hour <= activeEnd;
+  }
+
+  // ─── Anti-detection: rate limit messages per hour ───
+  shouldRateLimit() {
+    const hoursRunning = (Date.now() - this.sessionStart) / (1000 * 60 * 60);
+    const messagesPerHour = this.messageCount / Math.max(hoursRunning, 0.1);
+    // A real person wouldn't reply to more than ~15-20 conversations per hour
+    return messagesPerHour > 15;
   }
 
   async init() {
@@ -47,15 +67,32 @@ class InstagramBot {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-blink-features=AutomationControlled',
+        '--disable-dev-shm-usage',
       ],
     });
 
+    // Randomise viewport slightly each session (real screens vary)
+    const widths = [1280, 1366, 1440, 1536, 1920];
+    const heights = [720, 768, 900, 864, 1080];
+    const vpWidth = widths[Math.floor(Math.random() * widths.length)];
+    const vpHeight = heights[Math.floor(Math.random() * heights.length)];
+
+    // Rotate user agents to look like different devices
+    const userAgents = [
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+    ];
+    const ua = userAgents[Math.floor(Math.random() * userAgents.length)];
+
     const contextOptions = {
-      viewport: { width: 1366, height: 768 },
-      userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      viewport: { width: vpWidth, height: vpHeight },
+      userAgent: ua,
       locale: 'en-GB',
       timezoneId: 'Europe/London',
+      // Realistic device pixel ratio
+      deviceScaleFactor: Math.random() > 0.5 ? 2 : 1,
     };
 
     // Load saved session if available
@@ -67,9 +104,29 @@ class InstagramBot {
     this.context = await this.browser.newContext(contextOptions);
     this.page = await this.context.newPage();
 
-    // Block unnecessary resources for speed
-    await this.page.route('**/*.{png,jpg,jpeg,gif,webp,svg,mp4,webm}', route => route.abort());
+    // ─── Anti-detection: mask automation signals ───
+    await this.page.addInitScript(() => {
+      // Hide webdriver flag
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      // Fake plugins
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => [1, 2, 3, 4, 5],
+      });
+      // Fake languages
+      Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-GB', 'en-US', 'en'],
+      });
+      // Override permissions query
+      const originalQuery = window.navigator.permissions.query;
+      window.navigator.permissions.query = (parameters) =>
+        parameters.name === 'notifications'
+          ? Promise.resolve({ state: Notification.permission })
+          : originalQuery(parameters);
+    });
+
+    // Don't block images — a real user loads images. Only block tracking/analytics
     await this.page.route('**/logging_client_events*', route => route.abort());
+    await this.page.route('**/batch/log*', route => route.abort());
   }
 
   async login() {
@@ -89,26 +146,24 @@ class InstagramBot {
     console.log('[BOT] Logging in as @' + this.username + '...');
 
     try {
-      // Wait for login form
       await this.page.waitForSelector('input[name="username"]', { timeout: 15000 });
 
-      // Type username like a human
+      // Click the field first, wait, then type slowly like a real person
       await this.page.click('input[name="username"]');
-      await this.humanDelay(300, 600);
+      await this.humanDelay(400, 800);
       await this.humanType('input[name="username"]', this.username);
-      await this.humanDelay(500, 1000);
+      await this.humanDelay(600, 1200);
 
-      // Type password
-      await this.page.click('input[name="password"]');
-      await this.humanDelay(300, 600);
+      // Tab to password field like a human would
+      await this.page.keyboard.press('Tab');
+      await this.humanDelay(300, 700);
       await this.humanType('input[name="password"]', this.password);
-      await this.humanDelay(800, 1500);
+      await this.humanDelay(1000, 2000);
 
       // Click login
       await this.page.click('button[type="submit"]');
       console.log('[BOT] Login submitted, waiting...');
 
-      // Wait for either success or 2FA
       await this.page.waitForNavigation({ timeout: 30000 }).catch(() => {});
       await this.humanDelay(3000, 5000);
 
@@ -118,14 +173,12 @@ class InstagramBot {
         console.log('[BOT] 2FA required. Waiting for code...');
         this.waitingFor2FA = true;
 
-        // Notify that 2FA code is needed (sends WhatsApp alert)
         if (this.onTwoFactorNeeded) {
           await this.onTwoFactorNeeded();
         }
 
-        // Wait up to 5 minutes for the code to be submitted
-        const maxWait = 300000; // 5 minutes
-        const checkInterval = 2000; // check every 2 seconds
+        const maxWait = 300000;
+        const checkInterval = 2000;
         let waited = 0;
 
         while (!this.twoFactorCode && waited < maxWait) {
@@ -140,12 +193,9 @@ class InstagramBot {
         }
 
         console.log('[BOT] 2FA code received, entering...');
-
-        // Enter the 2FA code
-        await this.page.fill('input[name="verificationCode"]', this.twoFactorCode);
+        await this.humanType('input[name="verificationCode"]', this.twoFactorCode);
         await this.humanDelay(500, 1000);
 
-        // Click confirm/submit button
         const confirmBtn = await this.page.$('button:has-text("Confirm"), button[type="button"]:not([aria-label])');
         if (confirmBtn) {
           await confirmBtn.click();
@@ -155,11 +205,9 @@ class InstagramBot {
 
         this.waitingFor2FA = false;
         this.twoFactorCode = null;
-
         await this.humanDelay(3000, 5000);
       }
 
-      // Check if login succeeded
       const success = await this.isLoggedIn();
       if (!success) {
         console.error('[BOT] Login failed. Check credentials.');
@@ -178,7 +226,6 @@ class InstagramBot {
 
   async isLoggedIn() {
     try {
-      // Multiple ways to detect logged in state
       const indicators = await Promise.race([
         this.page.waitForSelector('svg[aria-label="Home"]', { timeout: 5000 }).then(() => true),
         this.page.waitForSelector('a[href="/direct/inbox/"]', { timeout: 5000 }).then(() => true),
@@ -191,7 +238,6 @@ class InstagramBot {
   }
 
   async dismissPopups() {
-    // Save login info popup
     try {
       const saveInfo = await this.page.$('button:has-text("Save info"), button:has-text("Save Info")');
       if (saveInfo) {
@@ -200,7 +246,6 @@ class InstagramBot {
       }
     } catch {}
 
-    // Notifications popup
     try {
       const notNow = await this.page.$('button:has-text("Not Now"), button:has-text("not now")');
       if (notNow) {
@@ -218,7 +263,6 @@ class InstagramBot {
     console.log('[BOT] Session saved');
   }
 
-  // Navigate to DM inbox
   async goToInbox() {
     const currentUrl = this.page.url();
     if (!currentUrl.includes('/direct/inbox') && !currentUrl.includes('/direct/t/')) {
@@ -231,23 +275,16 @@ class InstagramBot {
     }
   }
 
-  // Find conversations with unread messages
   async getUnreadConversations() {
     await this.goToInbox();
-    await this.humanDelay(1000, 2000);
+    await this.humanDelay(1500, 3000);
 
     const unreadConvos = [];
 
     try {
-      // Instagram DM inbox: conversations are in a scrollable list
-      // Unread conversations have bold text or a visual indicator
-      // We look for conversation items that have unread styling
-
-      // Get all conversation elements in the inbox
       const conversationItems = await this.page.$$('[role="listbox"] > div > div, div[class*="x9f619"] a[href*="/direct/t/"]');
 
       if (conversationItems.length === 0) {
-        // Fallback: try clicking the messaging icon first
         try {
           const dmIcon = await this.page.$('svg[aria-label="Messenger"], svg[aria-label="Direct messaging"], a[href="/direct/inbox/"]');
           if (dmIcon) {
@@ -257,16 +294,12 @@ class InstagramBot {
         } catch {}
       }
 
-      // Get all links to conversations
       const convoLinks = await this.page.$$('a[href*="/direct/t/"]');
 
       for (const link of convoLinks) {
         try {
-          // Check if this conversation has unread indicator
-          // Instagram marks unread convos with a filled blue dot or bold text
           const parent = await link.evaluateHandle(el => el.closest('div[role="listitem"]') || el.parentElement?.parentElement);
           const hasUnread = await parent.evaluate(el => {
-            // Check for bold/semibold font weight (unread indicator)
             const spans = el.querySelectorAll('span');
             for (const span of spans) {
               const style = window.getComputedStyle(span);
@@ -274,7 +307,6 @@ class InstagramBot {
                 return true;
               }
             }
-            // Check for blue dot
             const dots = el.querySelectorAll('div[style*="background-color: rgb(0, 149, 246)"], div[class*="blue"]');
             if (dots.length > 0) return true;
             return false;
@@ -296,27 +328,19 @@ class InstagramBot {
     return unreadConvos;
   }
 
-  // Open a specific conversation and read messages
   async openConversation(convo) {
     console.log(`[BOT] Opening conversation ${convo.threadId}...`);
-
-    // Navigate directly to the conversation
     await this.page.goto(`https://www.instagram.com/direct/t/${convo.threadId}/`, {
       waitUntil: 'domcontentloaded',
     });
     await this.humanDelay(2000, 3000);
-
-    // Being on the page triggers "Seen" receipt
     console.log(`[BOT] Conversation opened (Seen triggered)`);
   }
 
-  // Get the username and latest message from the currently open conversation
   async getConversationInfo() {
     try {
-      // Get the username from the conversation header
       let username = 'unknown';
       try {
-        // The header usually has the username as a link
         const headerLink = await this.page.$('header a[href*="/"] span, div[role="heading"] span');
         if (headerLink) {
           username = await headerLink.textContent();
@@ -324,28 +348,18 @@ class InstagramBot {
         }
       } catch {}
 
-      // Get messages in the conversation
-      // Messages are typically in div elements within the message thread
       const messages = await this.page.evaluate(() => {
         const result = [];
-        // Instagram messages are in rows within the conversation
         const messageRows = document.querySelectorAll('div[role="row"]');
 
         for (const row of messageRows) {
-          // Each row may contain a message
           const textElements = row.querySelectorAll('div[dir="auto"] span');
           for (const el of textElements) {
             const text = el.textContent?.trim();
             if (text && text.length > 0 && text.length < 2000) {
-              // Try to determine if this is from the other user or from us
-              // Messages from other users are typically on the left side
               const rect = row.getBoundingClientRect();
-              const parentDiv = el.closest('div[class]');
-              const style = parentDiv ? window.getComputedStyle(parentDiv) : null;
-
               result.push({
                 text,
-                // This is a heuristic: our messages tend to be right-aligned
                 position: rect.left < window.innerWidth / 2 ? 'left' : 'right',
               });
             }
@@ -355,7 +369,6 @@ class InstagramBot {
         return result;
       });
 
-      // The last message from the other user (left side) is what we need to respond to
       const theirMessages = messages.filter(m => m.position === 'left');
       const latestMessage = theirMessages.length > 0 ? theirMessages[theirMessages.length - 1].text : null;
 
@@ -366,10 +379,9 @@ class InstagramBot {
     }
   }
 
-  // Type a message with human-like keystrokes
+  // ─── Human-like typing with realistic patterns ───
   async typeAndSend(text) {
     try {
-      // Find the message input
       const input = await this.page.$(
         'div[role="textbox"][contenteditable="true"], textarea[placeholder*="Message"], div[aria-label*="Message"]'
       );
@@ -381,36 +393,66 @@ class InstagramBot {
 
       // Click the input to focus
       await input.click();
-      await this.humanDelay(500, 1000);
+      await this.humanDelay(600, 1200);
 
-      // Type character by character with human-like delays
-      for (let i = 0; i < text.length; i++) {
-        const char = text[i];
-        await this.page.keyboard.type(char, { delay: 0 });
+      // Type in bursts like a real person (type a few words, pause, type more)
+      const words = text.split(' ');
+      let charIndex = 0;
 
-        // Variable delay between keystrokes
-        // Faster for common letters, slower at word boundaries
-        if (char === ' ' || char === '.' || char === ',' || char === '?' || char === '!') {
-          await this.humanDelay(80, 200);
-        } else if (char === '\n') {
-          await this.humanDelay(200, 400);
-        } else {
-          await this.humanDelay(30, 90);
+      for (let w = 0; w < words.length; w++) {
+        const word = words[w];
+        const isLastWord = w === words.length - 1;
+
+        // Type each character of the word
+        for (let i = 0; i < word.length; i++) {
+          const char = word[i];
+          await this.page.keyboard.type(char, { delay: 0 });
+
+          // Base typing speed: 35-85ms per character (realistic WPM range)
+          const baseDelay = Math.floor(Math.random() * 50) + 35;
+
+          // Slow down for punctuation
+          if ('.!?,;:'.includes(char)) {
+            await this.humanDelay(100, 250);
+          } else {
+            await this.humanDelay(baseDelay, baseDelay + 30);
+          }
         }
 
-        // Occasional longer pause (thinking while typing)
-        if (Math.random() < 0.03) {
-          await this.humanDelay(500, 1500);
+        // Add space between words (not after last word)
+        if (!isLastWord) {
+          await this.page.keyboard.type(' ', { delay: 0 });
+          await this.humanDelay(50, 120);
+        }
+
+        // Occasional pause between words (thinking while typing)
+        // More likely at sentence boundaries or after every 4-8 words
+        if (!isLastWord) {
+          const wordsSinceLastPause = w % (Math.floor(Math.random() * 5) + 4);
+          if (wordsSinceLastPause === 0 && Math.random() < 0.4) {
+            await this.humanDelay(800, 2500);
+          }
+        }
+
+        // Rare: simulate a typo and correction (makes it look very human)
+        if (Math.random() < 0.02 && word.length > 4) {
+          // Type a wrong char, pause, backspace, type the right one
+          await this.page.keyboard.type('x', { delay: 0 });
+          await this.humanDelay(200, 400);
+          await this.page.keyboard.press('Backspace');
+          await this.humanDelay(100, 300);
         }
       }
 
-      await this.humanDelay(300, 800);
+      // Pause before sending (reviewing the message)
+      await this.humanDelay(500, 1500);
 
       // Press Enter to send
       await this.page.keyboard.press('Enter');
-      console.log(`[BOT] Message sent: ${text.substring(0, 50)}...`);
+      console.log(`[BOT] Message sent: ${text.substring(0, 60)}...`);
 
-      await this.humanDelay(1000, 2000);
+      // Stay on the conversation briefly like a real person would
+      await this.humanDelay(1500, 3000);
       return true;
     } catch (error) {
       console.error('[BOT] Error typing message:', error.message);
@@ -418,17 +460,30 @@ class InstagramBot {
     }
   }
 
-  // Main polling loop
-  async startPolling(intervalMs = 10000) {
+  // ─── Main polling loop with human-like patterns ───
+  async startPolling(intervalMs = 15000) {
     this.isRunning = true;
-    console.log(`[BOT] Starting DM polling every ${intervalMs / 1000}s...`);
+    console.log(`[BOT] Starting DM monitoring...`);
 
     while (this.isRunning) {
       try {
+        // Don't respond outside active hours (like a real person sleeping)
+        if (!this.isActiveHours()) {
+          console.log('[BOT] Outside active hours, sleeping...');
+          await this.humanDelay(300000, 600000); // check again in 5-10 mins
+          continue;
+        }
+
+        // Rate limit: don't reply too fast
+        if (this.shouldRateLimit()) {
+          console.log('[BOT] Rate limiting, taking a break...');
+          await this.humanDelay(120000, 300000); // 2-5 min break
+          continue;
+        }
+
         await this.checkAndReply();
       } catch (error) {
         console.error('[BOT] Polling error:', error.message);
-        // Try to recover
         try {
           await this.page.goto('https://www.instagram.com/direct/inbox/', {
             waitUntil: 'domcontentloaded',
@@ -436,9 +491,17 @@ class InstagramBot {
         } catch {}
       }
 
-      // Wait before next check with some randomness
-      const jitter = Math.floor(Math.random() * 5000);
-      await this.humanDelay(intervalMs, intervalMs + jitter);
+      // Variable polling interval (not a fixed pattern)
+      // Real people don't check DMs at exact intervals
+      const baseWait = intervalMs;
+      const variation = Math.floor(Math.random() * 20000); // 0-20s extra
+      const occasionalLongPause = Math.random() < 0.1 ? Math.floor(Math.random() * 60000) : 0; // 10% chance of extra 0-60s pause
+      await this.humanDelay(baseWait + variation, baseWait + variation + occasionalLongPause + 5000);
+
+      // Periodically save session to stay logged in
+      if (Math.random() < 0.05) {
+        await this.saveSession();
+      }
     }
   }
 
@@ -451,12 +514,17 @@ class InstagramBot {
 
     console.log(`[BOT] Found ${unread.length} unread conversation(s)`);
 
-    for (const convo of unread) {
+    // Don't process all at once — a real person handles them one at a time
+    // with breaks in between
+    const maxToProcess = Math.min(unread.length, 3); // max 3 at a time
+
+    for (let i = 0; i < maxToProcess; i++) {
+      const convo = unread[i];
       try {
         // Open the conversation (triggers "Seen")
         await this.openConversation(convo);
 
-        // Read the conversation info
+        // Realistic reading time — actually read the message
         const info = await this.getConversationInfo();
 
         if (!info.latestMessage) {
@@ -464,7 +532,6 @@ class InstagramBot {
           continue;
         }
 
-        // Create a unique message ID to avoid double-processing
         const msgId = `${convo.threadId}_${info.latestMessage.substring(0, 50)}`;
         if (this.processedMessages.has(msgId)) {
           console.log(`[BOT] Already processed message in ${convo.threadId}`);
@@ -473,33 +540,51 @@ class InstagramBot {
 
         console.log(`[BOT] New message from @${info.username}: ${info.latestMessage}`);
 
-        // Simulate reading time
-        const readDelay = Math.min(info.latestMessage.length * 60, 4000) + 1000;
-        console.log(`[BOT] Reading message (${readDelay}ms)...`);
-        await this.humanDelay(readDelay, readDelay + 2000);
+        // ─── Realistic response timing ───
+        // A real person: sees message → reads it → thinks → types reply
 
-        // Call the message handler to get AI response
+        // 1. Reading time (based on message length, ~200-250 WPM reading speed)
+        const wordCount = info.latestMessage.split(' ').length;
+        const readingMs = Math.max(wordCount * 300, 2000) + Math.floor(Math.random() * 3000);
+        console.log(`[BOT] Reading (${Math.round(readingMs/1000)}s)...`);
+        await this.humanDelay(readingMs, readingMs + 2000);
+
+        // 2. Sometimes a person doesn't reply immediately — they might:
+        //    - Check the profile first
+        //    - Think about what to say
+        //    - Get distracted briefly
+        if (Math.random() < 0.3) {
+          const extraThinkTime = Math.floor(Math.random() * 15000) + 5000; // 5-20s extra
+          console.log(`[BOT] Thinking (${Math.round(extraThinkTime/1000)}s)...`);
+          await this.humanDelay(extraThinkTime, extraThinkTime + 3000);
+        }
+
+        // 3. Get AI response (this takes a second or two from the API)
         if (this.onMessage) {
           const response = await this.onMessage(convo.threadId, info.username, info.latestMessage);
 
           if (response) {
-            // Simulate thinking/typing delay based on response length
-            const thinkDelay = Math.min(response.length * 25, 5000) + 2000;
-            console.log(`[BOT] Thinking (${thinkDelay}ms)...`);
-            await this.humanDelay(thinkDelay, thinkDelay + 3000);
+            // 4. Brief pause before typing starts
+            await this.humanDelay(1500, 4000);
 
-            // Type and send the response
+            // 5. Type and send with realistic keystrokes
             await this.typeAndSend(response);
+            this.messageCount++;
           }
         }
 
-        // Mark as processed
         this.processedMessages.add(msgId);
         this.saveProcessed();
 
-        // Go back to inbox for next conversation
+        // Break between conversations (real person doesn't instantly jump to next)
+        if (i < maxToProcess - 1) {
+          const breakTime = Math.floor(Math.random() * 10000) + 5000; // 5-15s between convos
+          console.log(`[BOT] Taking a break before next conversation (${Math.round(breakTime/1000)}s)...`);
+          await this.humanDelay(breakTime, breakTime + 3000);
+        }
+
         await this.goToInbox();
-        await this.humanDelay(1000, 2000);
+        await this.humanDelay(1500, 3000);
       } catch (error) {
         console.error(`[BOT] Error processing conversation ${convo.threadId}:`, error.message);
       }
@@ -512,14 +597,13 @@ class InstagramBot {
     return new Promise(resolve => setTimeout(resolve, delay));
   }
 
-  // Human-like typing into an input field (for login etc)
+  // Human-like typing into an input field
   async humanType(selector, text) {
     for (const char of text) {
-      await this.page.type(selector, char, { delay: Math.floor(Math.random() * 100) + 30 });
+      await this.page.type(selector, char, { delay: Math.floor(Math.random() * 80) + 40 });
     }
   }
 
-  // Submit a 2FA code (called from the API endpoint)
   submit2FACode(code) {
     if (this.waitingFor2FA) {
       this.twoFactorCode = code.toString().trim();
