@@ -283,6 +283,54 @@ app.get('/bot/screenshot', async (req, res) => {
   }
 });
 
+// Debug: dump inbox HTML structure
+app.get('/bot/debug-inbox', async (req, res) => {
+  if (!global.igBot || !global.igBot.page) {
+    return res.status(400).json({ error: 'Bot not running' });
+  }
+  try {
+    await global.igBot.page.goto('https://www.instagram.com/direct/inbox/', { waitUntil: 'domcontentloaded' });
+    await new Promise(r => setTimeout(r, 5000));
+
+    const debug = await global.igBot.page.evaluate(() => {
+      const results = { links: [], allHrefs: [], inboxStructure: '' };
+
+      // Find all links with /direct/t/
+      document.querySelectorAll('a[href*="/direct/t/"]').forEach(a => {
+        results.links.push({ href: a.href, text: a.textContent?.substring(0, 80), tag: a.tagName });
+      });
+
+      // Find all links period
+      document.querySelectorAll('a[href*="direct"]').forEach(a => {
+        results.allHrefs.push(a.href);
+      });
+
+      // Get the inbox container structure
+      const inbox = document.querySelector('[role="list"], [role="listbox"], div[aria-label*="Direct"], div[aria-label*="inbox"], div[aria-label*="Chats"]');
+      if (inbox) {
+        results.inboxStructure = inbox.outerHTML.substring(0, 3000);
+      }
+
+      // Try to find conversation items by various methods
+      const methods = {
+        'role=listitem': document.querySelectorAll('[role="listitem"]').length,
+        'role=row': document.querySelectorAll('[role="row"]').length,
+        'role=option': document.querySelectorAll('[role="option"]').length,
+        'a[href*=direct/t]': document.querySelectorAll('a[href*="/direct/t/"]').length,
+        'a[href*=direct]': document.querySelectorAll('a[href*="direct"]').length,
+        'div with blue dot': document.querySelectorAll('div[style*="background-color: rgb(0, 149, 246)"]').length,
+      };
+      results.selectorCounts = methods;
+
+      return results;
+    });
+
+    res.json(debug);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Debug: get current page info
 app.get('/bot/status', async (req, res) => {
   if (!global.igBot || !global.igBot.page) {
