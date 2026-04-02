@@ -179,59 +179,60 @@ class InstagramBot {
         await this.humanDelay(5000, 8000);
       }
 
-      // Use JavaScript to detect and click elements (more reliable than Playwright selectors)
-      const screenAction = await this.page.evaluate(() => {
-        // Check all buttons and links for "Continue"
-        const allClickables = [...document.querySelectorAll('button, a, div[role="button"]')];
-        for (const el of allClickables) {
-          const text = el.textContent?.trim();
-          if (text === 'Continue' || text === 'Log in' || text === 'Log In') {
-            el.click();
-            return `clicked: ${text}`;
+      // Detect "Continue as" screen by checking page text
+      const pageText = await this.page.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
+
+      if (pageText.includes('Continue') && pageText.includes('charmframes')) {
+        console.log('[BOT] "Continue as" screen detected, clicking with Playwright...');
+        try {
+          // Use Playwright click with force to handle React buttons
+          await this.page.click('button:has-text("Continue"), span:has-text("Continue")', { force: true, timeout: 10000 });
+          console.log('[BOT] Continue clicked, waiting for navigation...');
+          await this.humanDelay(5000, 8000);
+
+          if (await this.isLoggedIn()) {
+            console.log('[BOT] Logged in via Continue');
+            await this.dismissPopups();
+            await this.saveSession();
+            return true;
           }
-        }
 
-        // Check for cookie buttons
-        for (const el of allClickables) {
-          const text = el.textContent?.trim().toLowerCase();
-          if (text?.includes('allow') && text?.includes('cookies')) {
-            el.click();
-            return `clicked cookie: ${el.textContent?.trim()?.substring(0, 30)}`;
+          // If still not logged in, try navigating directly to the inbox
+          // since the "Continue as" screen means cookies are partially valid
+          console.log('[BOT] Continue click did not log in, trying direct navigation...');
+          await this.page.goto('https://www.instagram.com/direct/inbox/', { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+          await this.humanDelay(5000, 8000);
+
+          if (await this.isLoggedIn()) {
+            console.log('[BOT] Logged in via direct navigation');
+            await this.dismissPopups();
+            await this.saveSession();
+            return true;
           }
-          if (text === 'accept' || text === 'accept all') {
-            el.click();
-            return `clicked: ${text}`;
-          }
-        }
-
-        // Check if login form is present
-        const inputs = document.querySelectorAll('input');
-        if (inputs.length >= 2) {
-          return 'login_form_found';
-        }
-
-        return `nothing_found (${allClickables.length} clickables, ${inputs.length} inputs)`;
-      });
-
-      console.log(`[BOT] Screen action: ${screenAction}`);
-
-      if (screenAction.startsWith('clicked')) {
-        await this.humanDelay(5000, 8000);
-        if (await this.isLoggedIn()) {
-          console.log('[BOT] Logged in after clicking');
-          await this.dismissPopups();
-          await this.saveSession();
-          return true;
+        } catch (e) {
+          console.log('[BOT] Continue click error:', e.message);
         }
         continue;
       }
 
-      if (screenAction === 'login_form_found') {
+      // Check for cookie buttons
+      if (pageText.toLowerCase().includes('cookies')) {
+        try {
+          await this.page.click('button:has-text("Allow"), button:has-text("Accept")', { force: true, timeout: 5000 });
+          console.log('[BOT] Dismissed cookie popup');
+          await this.humanDelay(2000, 3000);
+        } catch {}
+        continue;
+      }
+
+      // Check for login form
+      const hasInputs = await this.page.$$('input');
+      if (hasInputs.length >= 2) {
         console.log('[BOT] Login form detected');
         break;
       }
 
-      // Not on login page - navigate there
+      // Navigate to login page
       if (!currentUrl.includes('accounts/login')) {
         console.log('[BOT] Navigating to login page...');
         await this.page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
