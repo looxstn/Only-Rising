@@ -512,12 +512,33 @@ class InstagramBot {
   }
 
   async apiSendMessage(threadId, text) {
+    // Try the thread-specific send endpoint first
     const body = new URLSearchParams();
     body.append('action', 'send_item');
     body.append('thread_ids', `[${threadId}]`);
-    body.append('client_context', `${Date.now()}_${Math.random()}`);
+    body.append('client_context', `6${Date.now()}_${Math.floor(Math.random() * 1000000000)}`);
     body.append('text', text);
-    return this._apiCall('/api/v1/direct_v2/threads/broadcast/text/', 'POST', body.toString());
+
+    // Try multiple send endpoints
+    const endpoints = [
+      `/api/v1/direct_v2/threads/${threadId}/items/`,
+      '/api/v1/direct_v2/threads/broadcast/text/',
+      `/ig/direct_v2/threads/${threadId}/items/`,
+    ];
+
+    for (const endpoint of endpoints) {
+      const result = await this._apiCall(endpoint, 'POST', body.toString());
+      if (result) {
+        console.log(`[BOT] Send succeeded via ${endpoint}`);
+        return result;
+      }
+    }
+
+    // Fallback: navigate to the conversation and type it manually
+    console.log('[BOT] API send failed, falling back to typing...');
+    await this.page.goto(`https://www.instagram.com/direct/t/${threadId}/`, { waitUntil: 'domcontentloaded' });
+    await this.humanDelay(3000, 5000);
+    return await this.typeAndSend(text) ? { status: 'ok' } : null;
   }
 
   async apiApproveThread(threadId) {
@@ -795,11 +816,11 @@ class InstagramBot {
 
             // Send via API
             const sendResult = await this.apiSendMessage(convo.threadId, response);
-            if (sendResult?.status === 'ok' || sendResult?.status_code === '200') {
+            if (sendResult) {
               console.log(`[MSG] Replied to @${convo.username}: ${response.substring(0, 60)}...`);
               this.messageCount++;
             } else {
-              console.error(`[BOT] Failed to send to @${convo.username}:`, JSON.stringify(sendResult));
+              console.error(`[BOT] Failed to send to @${convo.username}`);
             }
           }
         }
