@@ -161,88 +161,42 @@ class InstagramBot {
       return true;
     }
 
-    // Might be on a "Continue as" screen or redirected to login
-    // Wait and detect what screen we're on
-    console.log('[BOT] Not logged in yet, detecting screen...');
+    // Go directly to the login page
+    console.log('[BOT] Session not valid, going to login page...');
+    await this.page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    await this.humanDelay(5000, 8000);
 
-    // Try up to 3 times with different approaches
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      console.log(`[BOT] Login attempt ${attempt}/3...`);
-      const currentUrl = this.page.url();
-      console.log(`[BOT] Current URL: ${currentUrl}`);
-
-      try {
-        // Wait for SOMETHING to render
-        await this.page.waitForSelector('button, input, a[href*="accounts"]', { timeout: 15000 });
-      } catch {
-        console.log('[BOT] Page still loading, waiting more...');
-        await this.humanDelay(5000, 8000);
-      }
-
-      // Detect "Continue as" screen by checking page text
-      const pageText = await this.page.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
-
-      if (pageText.includes('Continue') && pageText.includes('charmframes')) {
-        console.log('[BOT] "Continue as" screen detected, clicking with Playwright...');
-        try {
-          // Use Playwright click with force to handle React buttons
-          await this.page.click('button:has-text("Continue"), span:has-text("Continue")', { force: true, timeout: 10000 });
-          console.log('[BOT] Continue clicked, waiting for navigation...');
-          await this.humanDelay(5000, 8000);
-
-          if (await this.isLoggedIn()) {
-            console.log('[BOT] Logged in via Continue');
-            await this.dismissPopups();
-            await this.saveSession();
-            return true;
-          }
-
-          // If still not logged in, try navigating directly to the inbox
-          // since the "Continue as" screen means cookies are partially valid
-          console.log('[BOT] Continue click did not log in, trying direct navigation...');
-          await this.page.goto('https://www.instagram.com/direct/inbox/', { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
-          await this.humanDelay(5000, 8000);
-
-          if (await this.isLoggedIn()) {
-            console.log('[BOT] Logged in via direct navigation');
-            await this.dismissPopups();
-            await this.saveSession();
-            return true;
-          }
-        } catch (e) {
-          console.log('[BOT] Continue click error:', e.message);
+    // Dismiss any popups (cookies etc)
+    await this.page.evaluate(() => {
+      const btns = [...document.querySelectorAll('button')];
+      for (const b of btns) {
+        const t = b.textContent?.toLowerCase() || '';
+        if (t.includes('allow') || t.includes('accept') || t.includes('only allow essential')) {
+          b.click();
+          return;
         }
-        continue;
       }
+    });
+    await this.humanDelay(1000, 2000);
 
-      // Check for cookie buttons
-      if (pageText.toLowerCase().includes('cookies')) {
-        try {
-          await this.page.click('button:has-text("Allow"), button:has-text("Accept")', { force: true, timeout: 5000 });
-          console.log('[BOT] Dismissed cookie popup');
-          await this.humanDelay(2000, 3000);
-        } catch {}
-        continue;
-      }
-
-      // Check for login form
-      const hasInputs = await this.page.$$('input');
-      if (hasInputs.length >= 2) {
-        console.log('[BOT] Login form detected');
-        break;
-      }
-
-      // Navigate to login page
-      if (!currentUrl.includes('accounts/login')) {
-        console.log('[BOT] Navigating to login page...');
-        await this.page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
-        await this.humanDelay(5000, 8000);
-        continue;
-      }
-
-      console.log('[BOT] Page not ready, waiting...');
-      await this.humanDelay(5000, 8000);
+    // If we see "Continue as" screen, click "Use another profile" to get the login form
+    const pageContent = await this.page.evaluate(() => document.body?.innerText || '');
+    if (pageContent.includes('Use another profile') || pageContent.includes('Continue')) {
+      console.log('[BOT] "Continue as" screen, clicking "Use another profile"...');
+      await this.page.evaluate(() => {
+        const links = [...document.querySelectorAll('a, button, span')];
+        for (const el of links) {
+          if (el.textContent?.includes('Use another profile') || el.textContent?.includes('another')) {
+            el.click();
+            return;
+          }
+        }
+      });
+      await this.humanDelay(3000, 5000);
     }
+
+    // Wait for the login form to appear
+    console.log('[BOT] Waiting for login form...');
 
     // Now enter credentials
     console.log('[BOT] Logging in as @' + this.username + '...');
