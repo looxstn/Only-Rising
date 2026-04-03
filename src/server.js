@@ -123,14 +123,18 @@ async function processMessage(subscriberId, messageText, body) {
     console.log(`[AI] Response for ${subscriberId} (@${username}): ${aiResponse.message}`);
     console.log(`[AI] Stage: ${aiResponse.conversation_stage} | Escalation: ${JSON.stringify(aiResponse.escalation)} | Qualification: ${JSON.stringify(aiResponse.qualification)}`);
 
-    // ─── Realistic delay: 1-5 minutes ───
-    // Vary based on message length and randomness
-    const minDelay = 60 * 1000;   // 1 min
-    const maxDelay = 2 * 60 * 1000; // 2 min
-    const delay = Math.floor(Math.random() * (maxDelay - minDelay)) + minDelay;
-    console.log(`[TYPING] Waiting ${Math.round(delay / 1000)}s before replying to @${username}...`);
-
-    await new Promise(resolve => setTimeout(resolve, delay));
+    // ─── Realistic delay ───
+    // Skip delay if escalation or Calendly — Luca may jump in with screenshots/results
+    const needsQuickReply = aiResponse.escalation || aiResponse.send_calendly;
+    if (needsQuickReply) {
+      console.log(`[TYPING] Escalation/Calendly — sending immediately to @${username}`);
+    } else {
+      const minDelay = 60 * 1000;   // 1 min
+      const maxDelay = 2 * 60 * 1000; // 2 min
+      const delay = Math.floor(Math.random() * (maxDelay - minDelay)) + minDelay;
+      console.log(`[TYPING] Waiting ${Math.round(delay / 1000)}s before replying to @${username}...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
 
     // Send via ManyChat API
     await manychat.sendMessage(subscriberId, aiResponse.message);
