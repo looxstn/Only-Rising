@@ -481,6 +481,74 @@ async function handleBotMessage(senderId, senderUsername, messageText) {
   return aiResponse.message;
 }
 
+// ─── Check for missed messages on startup ───
+// After a redeploy, find conversations where the last message is from a creator
+// (meaning we never replied) and process them
+
+async function checkMissedMessages() {
+  try {
+    const allConvos = conversationStore.getAllConversations();
+    const now = Date.now();
+    let missed = 0;
+
+    for (const convo of allConvos) {
+      if (!convo.messages || convo.messages.length === 0) continue;
+
+      const lastMsg = convo.messages[convo.messages.length - 1];
+
+      // Only process if last message is from creator (we haven't replied)
+      if (lastMsg.role !== 'creator') continue;
+
+      // Only process messages from the last 10 minutes (deploy window)
+      const msgAge = now - new Date(lastMsg.timestamp).getTime();
+      if (msgAge > 10 * 60 * 1000) continue;
+
+      missed++;
+      console.log(`[STARTUP] Missed message from @${convo.username || convo.igUserId}: "${lastMsg.text.substring(0, 50)}..." (${Math.round(msgAge / 1000)}s ago)`);
+
+      // Process the missed message (will generate AI reply + send via ManyChat)
+      const body = {
+        subscriber_id: convo.igUserId,
+        ig_username: convo.username,
+        page: convo.page || 'charmframes',
+      };
+
+      // Don't re-store the creator message — it's already stored
+      // Just generate and send the reply
+      const profile = { username: convo.username, follower_count: 0, page: convo.page || 'charmframes' };
+      const aiResponse = await ai.generateResponse(convo.messages, profile);
+
+      if (aiResponse && aiResponse.message) {
+        // Shorter delay for catch-up messages (30-60s since they already waited)
+        const delay = Math.floor(Math.random() * 30000) + 30000;
+        console.log(`[STARTUP] Replying to @${convo.username} in ${Math.round(delay / 1000)}s...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+
+        await manychat.sendMessage(convo.igUserId, aiResponse.message);
+        conversationStore.addMessage(convo.igUserId, 'assistant', aiResponse.message);
+
+        if (aiResponse.conversation_stage) {
+          conversationStore.updateStage(convo.igUserId, aiResponse.conversation_stage);
+        }
+        if (aiResponse.escalation) {
+          conversationStore.addEscalation(convo.igUserId, aiResponse.escalation);
+          await whatsapp.processEscalation(aiResponse.escalation, convo.username || convo.igUserId, aiResponse.conversation_stage || 'unknown');
+        }
+
+        console.log(`[STARTUP] Caught up with @${convo.username}: ${aiResponse.message.substring(0, 60)}...`);
+      }
+    }
+
+    if (missed === 0) {
+      console.log('[STARTUP] No missed messages found');
+    } else {
+      console.log(`[STARTUP] Processed ${missed} missed message(s)`);
+    }
+  } catch (error) {
+    console.error('[STARTUP] Error checking missed messages:', error.message);
+  }
+}
+
 // ─── Start server ───
 
 async function start() {
@@ -494,6 +562,9 @@ async function start() {
     console.log(`  Mode: ${mode}`);
     console.log(`  Running on port ${PORT}`);
     console.log(`=================================\n`);
+
+    // Check for missed messages after server is ready
+    checkMissedMessages();
   });
 
   // Start Instagram browser bot if credentials are configured
