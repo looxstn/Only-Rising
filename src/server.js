@@ -191,6 +191,12 @@ async function processMessage(subscriberId, messageText, body) {
       conversationStore.saveConversation(subscriberId, convo);
     }
 
+    if (aiResponse.send_whatsapp_link) {
+      const convo = conversationStore.getConversation(subscriberId);
+      convo.whatsappLinkSent = true;
+      conversationStore.saveConversation(subscriberId, convo);
+    }
+
     if (aiResponse.escalation) {
       conversationStore.addEscalation(subscriberId, aiResponse.escalation);
       await whatsapp.processEscalation(
@@ -202,7 +208,7 @@ async function processMessage(subscriberId, messageText, body) {
 
     // Check message threshold
     const updatedConvo = conversationStore.getConversation(subscriberId);
-    if (updatedConvo.messageCount >= 10 && !updatedConvo.calendlySent) {
+    if (updatedConvo.messageCount >= 10 && !updatedConvo.calendlySent && !updatedConvo.whatsappLinkSent) {
       const alreadyAlerted = updatedConvo.escalations.some(e => e.type === 'message_threshold');
       if (!alreadyAlerted) {
         conversationStore.addEscalation(subscriberId, {
@@ -481,6 +487,13 @@ async function handleBotMessage(senderId, senderUsername, messageText) {
     conversationStore.saveConversation(senderId, convo);
   }
 
+  // Mark if WhatsApp link was sent
+  if (aiResponse.send_whatsapp_link) {
+    const convo = conversationStore.getConversation(senderId);
+    convo.whatsappLinkSent = true;
+    conversationStore.saveConversation(senderId, convo);
+  }
+
   // Process escalations
   if (aiResponse.escalation) {
     conversationStore.addEscalation(senderId, aiResponse.escalation);
@@ -493,7 +506,7 @@ async function handleBotMessage(senderId, senderUsername, messageText) {
 
   // Check message threshold
   const updatedConvo = conversationStore.getConversation(senderId);
-  if (updatedConvo.messageCount >= 10 && !updatedConvo.calendlySent) {
+  if (updatedConvo.messageCount >= 10 && !updatedConvo.calendlySent && !updatedConvo.whatsappLinkSent) {
     const alreadyAlerted = updatedConvo.escalations.some(e => e.type === 'message_threshold');
     if (!alreadyAlerted) {
       conversationStore.addEscalation(senderId, {

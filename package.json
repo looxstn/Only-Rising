@@ -5,7 +5,9 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
+    "start:standalone": "node src/standalone/server.js",
     "dev": "node --watch src/server.js",
+    "dev:standalone": "node --watch src/standalone/server.js",
     "import-convos": "node scripts/import-conversation.js",
     "weekly-analysis": "node -e \"require('./src/server.js')\" --run-analysis"
   },

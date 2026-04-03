@@ -93,6 +93,11 @@ This creator responded to our cold outreach DM. Continue the conversation natura
         );
       }
 
+      // Insert WhatsApp link if needed
+      if (parsed.send_whatsapp_link && parsed.message && !parsed.message.includes('wa.me')) {
+        parsed.message += '\nhttps://wa.me/447828765884';
+      }
+
       return parsed;
     } catch (error) {
       console.error('[AI] Error generating response:', error.message);
