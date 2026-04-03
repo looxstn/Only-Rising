@@ -31,6 +31,7 @@ class ManyChatAPI {
             ],
           },
         },
+        message_tag: 'HUMAN_AGENT',
       });
       console.log(`[MANYCHAT] Message sent to subscriber ${subscriberId}`);
       return response.data;
