@@ -60,6 +60,35 @@ const weeklyAnalysis = new WeeklyAnalysis(
   whatsapp
 );
 
+// ─── Pending message queue (survives deploys via file written before delay) ───
+const PENDING_FILE = require('path').join(__dirname, '../data/pending-messages.json');
+
+function loadPending() {
+  try {
+    if (fs.existsSync(PENDING_FILE)) return JSON.parse(fs.readFileSync(PENDING_FILE, 'utf-8'));
+  } catch (e) {}
+  return [];
+}
+
+function savePending(queue) {
+  const dir = require('path').dirname(PENDING_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(PENDING_FILE, JSON.stringify(queue, null, 2));
+}
+
+function addPending(entry) {
+  const queue = loadPending();
+  queue.push({ ...entry, timestamp: Date.now() });
+  savePending(queue);
+}
+
+function removePending(subscriberId) {
+  const queue = loadPending().filter(p => p.subscriberId !== subscriberId);
+  savePending(queue);
+}
+
+const fs = require('fs');
+
 // ─── Middleware ───
 
 app.use(express.json());
@@ -91,8 +120,10 @@ app.post('/manychat-webhook', async (req, res) => {
     return res.status(400).json({ error: 'subscriber_id and message are required' });
   }
 
+  // Save to pending queue BEFORE responding (survives deploy)
+  addPending({ subscriberId, messageText, body });
+
   // Respond to ManyChat IMMEDIATELY so it doesn't timeout
-  // We'll send the actual reply via ManyChat API after a delay
   res.json({ success: true, message: 'processing' });
 
   // Process in background with realistic delay
@@ -138,6 +169,7 @@ async function processMessage(subscriberId, messageText, body) {
 
     // Send via ManyChat API
     await manychat.sendMessage(subscriberId, aiResponse.message);
+    removePending(subscriberId);
     console.log(`[MSG] Replied to @${username}: ${aiResponse.message.substring(0, 60)}...`);
 
     // Store and process everything else
@@ -487,63 +519,37 @@ async function handleBotMessage(senderId, senderUsername, messageText) {
 
 async function checkMissedMessages() {
   try {
-    const allConvos = conversationStore.getAllConversations();
-    const now = Date.now();
-    let missed = 0;
-
-    for (const convo of allConvos) {
-      if (!convo.messages || convo.messages.length === 0) continue;
-
-      const lastMsg = convo.messages[convo.messages.length - 1];
-
-      // Only process if last message is from creator (we haven't replied)
-      if (lastMsg.role !== 'creator') continue;
-
-      // Only process messages from the last 10 minutes (deploy window)
-      const msgAge = now - new Date(lastMsg.timestamp).getTime();
-      if (msgAge > 10 * 60 * 1000) continue;
-
-      missed++;
-      console.log(`[STARTUP] Missed message from @${convo.username || convo.igUserId}: "${lastMsg.text.substring(0, 50)}..." (${Math.round(msgAge / 1000)}s ago)`);
-
-      // Process the missed message (will generate AI reply + send via ManyChat)
-      const body = {
-        subscriber_id: convo.igUserId,
-        ig_username: convo.username,
-        page: convo.page || 'charmframes',
-      };
-
-      // Don't re-store the creator message — it's already stored
-      // Just generate and send the reply
-      const profile = { username: convo.username, follower_count: 0, page: convo.page || 'charmframes' };
-      const aiResponse = await ai.generateResponse(convo.messages, profile);
-
-      if (aiResponse && aiResponse.message) {
-        // Shorter delay for catch-up messages (30-60s since they already waited)
-        const delay = Math.floor(Math.random() * 30000) + 30000;
-        console.log(`[STARTUP] Replying to @${convo.username} in ${Math.round(delay / 1000)}s...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-
-        await manychat.sendMessage(convo.igUserId, aiResponse.message);
-        conversationStore.addMessage(convo.igUserId, 'assistant', aiResponse.message);
-
-        if (aiResponse.conversation_stage) {
-          conversationStore.updateStage(convo.igUserId, aiResponse.conversation_stage);
-        }
-        if (aiResponse.escalation) {
-          conversationStore.addEscalation(convo.igUserId, aiResponse.escalation);
-          await whatsapp.processEscalation(aiResponse.escalation, convo.username || convo.igUserId, aiResponse.conversation_stage || 'unknown');
-        }
-
-        console.log(`[STARTUP] Caught up with @${convo.username}: ${aiResponse.message.substring(0, 60)}...`);
-      }
-    }
-
-    if (missed === 0) {
+    const pending = loadPending();
+    if (pending.length === 0) {
       console.log('[STARTUP] No missed messages found');
-    } else {
-      console.log(`[STARTUP] Processed ${missed} missed message(s)`);
+      return;
     }
+
+    // Only process messages from the last 10 minutes
+    const now = Date.now();
+    const recent = pending.filter(p => (now - p.timestamp) < 10 * 60 * 1000);
+
+    if (recent.length === 0) {
+      console.log('[STARTUP] Pending messages are too old, clearing queue');
+      savePending([]);
+      return;
+    }
+
+    console.log(`[STARTUP] Found ${recent.length} missed message(s), processing...`);
+
+    for (const entry of recent) {
+      const { subscriberId, messageText, body } = entry;
+      const username = body.ig_username || body.username || body.first_name || 'unknown';
+      const age = Math.round((now - entry.timestamp) / 1000);
+      console.log(`[STARTUP] Missed message from @${username}: "${messageText.substring(0, 50)}..." (${age}s ago)`);
+
+      // Process the missed message — full pipeline
+      await processMessage(subscriberId, messageText, body);
+    }
+
+    // Clear the queue
+    savePending([]);
+    console.log(`[STARTUP] Processed ${recent.length} missed message(s)`);
   } catch (error) {
     console.error('[STARTUP] Error checking missed messages:', error.message);
   }
