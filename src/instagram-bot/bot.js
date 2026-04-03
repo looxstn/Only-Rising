@@ -42,12 +42,9 @@ class InstagramBot {
   // ─── Anti-detection: check if we should be "active" right now ───
   // Simulates a real person who isn't online 24/7
   isActiveHours() {
-    const hour = new Date().getUTCHours();
-    // Active roughly 8am-11pm UTC (adjust based on your timezone)
-    // Add some randomness so it's not exact
-    const activeStart = 7 + Math.floor(Math.random() * 2); // 7-8am
-    const activeEnd = 22 + Math.floor(Math.random() * 2); // 22-23pm
-    return hour >= activeStart && hour <= activeEnd;
+    // For now, always active — the rate limiter handles anti-detection
+    // Can be restricted later if needed
+    return true;
   }
 
   // ─── Anti-detection: rate limit messages per hour ───
