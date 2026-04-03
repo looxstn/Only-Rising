@@ -107,10 +107,10 @@ class WhatsAppAlerts {
     );
   }
 
-  // Got contact info
+  // Got contact info — urgent, message them NOW
   async alertGotContact(username, summary, contact) {
     return this.sendAlert(
-      `✅ Only Rising Alert\n\n@${username} gave their contact info!\n\n${contact ? `Contact: ${contact}\n\n` : ''}${summary}\n\nMessage them on WhatsApp now.`
+      `🔥 NEW NUMBER\n\n@${username} just gave their WhatsApp/number!\n\n📱 ${contact || 'Check conversation'}\n\nMessage her now. The bot told her the CEO will message her shortly.\n\nFull convo: ${summary}`
     );
   }
 
