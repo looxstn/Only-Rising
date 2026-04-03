@@ -126,7 +126,7 @@ async function processMessage(subscriberId, messageText, body) {
     // ─── Realistic delay: 1-5 minutes ───
     // Vary based on message length and randomness
     const minDelay = 60 * 1000;   // 1 min
-    const maxDelay = 5 * 60 * 1000; // 5 min
+    const maxDelay = 2 * 60 * 1000; // 2 min
     const delay = Math.floor(Math.random() * (maxDelay - minDelay)) + minDelay;
     console.log(`[TYPING] Waiting ${Math.round(delay / 1000)}s before replying to @${username}...`);
 
