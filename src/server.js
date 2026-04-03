@@ -5,6 +5,7 @@ const cron = require('node-cron');
 
 const ManyChatAPI = require('./manychat/api');
 const InstagramBot = require('./instagram-bot/bot');
+const InstagramAPI = require('./meta/instagram');
 const ConversationEngine = require('./ai/conversation-engine');
 const conversationStore = require('./conversations/store');
 const WhatsAppAlerts = require('./alerts/whatsapp');
@@ -39,6 +40,12 @@ app.use(express.static(require('path').join(__dirname, '../public')));
 // ─── Initialize services ───
 
 const manychat = new ManyChatAPI(process.env.MANYCHAT_API_TOKEN);
+
+// Instagram Graph API (direct messaging, no ManyChat needed)
+const instagram = new InstagramAPI(
+  process.env.META_PAGE_ACCESS_TOKEN,
+  process.env.IG_ACCOUNT_ID
+);
 
 const ai = new ConversationEngine(process.env.ANTHROPIC_API_KEY);
 
@@ -96,8 +103,202 @@ function removePending(subscriberId) {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// ─── Meta Instagram Webhook (GET = verify, POST = receive messages) ───
+// This is the direct Instagram Messaging API integration — no ManyChat needed.
+// Meta sends ALL DMs here in real time.
+
+// Webhook verification (Meta pings this on setup)
+app.get('/webhook/instagram', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token === process.env.WEBHOOK_VERIFY_TOKEN) {
+    console.log('[META WEBHOOK] Verified successfully');
+    return res.status(200).send(challenge);
+  }
+  console.warn('[META WEBHOOK] Verification failed');
+  res.sendStatus(403);
+});
+
+// Receive messages from Instagram
+app.post('/webhook/instagram', async (req, res) => {
+  // Always respond 200 immediately so Meta doesn't retry
+  res.sendStatus(200);
+
+  try {
+    const body = req.body;
+
+    if (body.object !== 'instagram') return;
+
+    for (const entry of (body.entry || [])) {
+      for (const event of (entry.messaging || [])) {
+        // Skip echo messages (messages WE sent)
+        if (event.message?.is_echo) continue;
+
+        // Skip non-text messages for now (images, stickers, etc.)
+        if (!event.message?.text) {
+          // If it's a voice note, image, or attachment — escalate
+          const senderId = event.sender?.id;
+          if (senderId && event.message?.attachments) {
+            const attachType = event.message.attachments[0]?.type || 'unknown';
+            console.log(`[META WEBHOOK] @${senderId} sent ${attachType} (not text)`);
+
+            // Store what we can and escalate
+            const profile = await instagram.getUserProfile(senderId).catch(() => ({ username: 'unknown' }));
+            conversationStore.setProfile(senderId, profile.username || 'unknown', 'charmframes');
+
+            if (attachType === 'audio') {
+              conversationStore.addMessage(senderId, 'creator', '[Voice note]');
+              conversationStore.addEscalation(senderId, {
+                type: 'voice_note_received',
+                reason: 'Creator sent a voice note, needs human to listen and respond',
+              });
+              if (whatsapp) {
+                await whatsapp.processEscalation(
+                  { type: 'voice_note_received', reason: 'Creator sent a voice note' },
+                  profile.username || senderId,
+                  conversationStore.getConversation(senderId).conversationStage || 'unknown'
+                );
+              }
+            } else {
+              conversationStore.addMessage(senderId, 'creator', `[Sent ${attachType}]`);
+              conversationStore.addEscalation(senderId, {
+                type: 'needs_human',
+                reason: `Creator sent ${attachType}, bot cant process this`,
+              });
+              if (whatsapp) {
+                await whatsapp.processEscalation(
+                  { type: 'needs_human', reason: `Creator sent ${attachType}` },
+                  profile.username || senderId,
+                  conversationStore.getConversation(senderId).conversationStage || 'unknown'
+                );
+              }
+            }
+          }
+          continue;
+        }
+
+        const senderId = event.sender?.id;
+        const messageText = event.message.text;
+
+        if (!senderId || !messageText) continue;
+
+        console.log(`[META WEBHOOK] Message from ${senderId}: ${messageText.substring(0, 100)}`);
+
+        // Process through the same AI pipeline
+        processInstagramMessage(senderId, messageText).catch(err => {
+          console.error('[META WEBHOOK] Error processing:', err.message);
+        });
+      }
+    }
+  } catch (error) {
+    console.error('[META WEBHOOK] Error:', error.message);
+  }
+});
+
+// Process an Instagram DM through the AI pipeline
+async function processInstagramMessage(senderId, messageText) {
+  try {
+    // Fetch profile info from Instagram
+    const profile = await instagram.getUserProfile(senderId).catch(() => ({
+      username: 'unknown',
+      follower_count: 0,
+    }));
+
+    const creatorProfile = {
+      username: profile.username || 'unknown',
+      follower_count: profile.follower_count || 0,
+      page: 'charmframes',
+    };
+
+    // Store profile and message
+    conversationStore.setProfile(senderId, creatorProfile.username, creatorProfile.page);
+    conversationStore.addMessage(senderId, 'creator', messageText);
+    const conversation = conversationStore.getConversation(senderId);
+
+    // Generate AI response
+    const aiResponse = await ai.generateResponse(conversation.messages, creatorProfile);
+
+    if (!aiResponse || !aiResponse.message) {
+      console.error('[META] AI returned no message');
+      return;
+    }
+
+    console.log(`[META AI] Response for @${creatorProfile.username}: ${aiResponse.message}`);
+    console.log(`[META AI] Stage: ${aiResponse.conversation_stage} | Escalation: ${JSON.stringify(aiResponse.escalation)}`);
+
+    // Realistic delay (skip if escalation)
+    const needsQuickReply = aiResponse.escalation || aiResponse.send_calendly;
+    if (!needsQuickReply) {
+      const delay = Math.floor(Math.random() * (120000 - 60000)) + 60000;
+      console.log(`[META TYPING] Waiting ${Math.round(delay / 1000)}s before replying...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+
+    // Send reply via Instagram Graph API
+    await instagram.sendMessage(senderId, aiResponse.message);
+    console.log(`[META MSG] Replied to @${creatorProfile.username}: ${aiResponse.message.substring(0, 60)}...`);
+
+    // Store and process everything
+    conversationStore.addMessage(senderId, 'assistant', aiResponse.message);
+
+    if (aiResponse.conversation_stage) {
+      conversationStore.updateStage(senderId, aiResponse.conversation_stage);
+    }
+
+    if (aiResponse.qualification) {
+      conversationStore.updateQualification(senderId, aiResponse.qualification.field, aiResponse.qualification.value);
+    }
+
+    if (aiResponse.send_calendly) {
+      const convo = conversationStore.getConversation(senderId);
+      convo.calendlySent = true;
+      conversationStore.saveConversation(senderId, convo);
+    }
+
+    if (aiResponse.send_whatsapp_link) {
+      const convo = conversationStore.getConversation(senderId);
+      convo.whatsappLinkSent = true;
+      conversationStore.saveConversation(senderId, convo);
+    }
+
+    if (aiResponse.escalation) {
+      conversationStore.addEscalation(senderId, aiResponse.escalation);
+      if (whatsapp) {
+        await whatsapp.processEscalation(
+          aiResponse.escalation,
+          creatorProfile.username || senderId,
+          aiResponse.conversation_stage || 'unknown'
+        );
+      }
+    }
+
+    // Check message threshold
+    const updatedConvo = conversationStore.getConversation(senderId);
+    if (updatedConvo.messageCount >= 10 && !updatedConvo.calendlySent && !updatedConvo.whatsappLinkSent) {
+      const alreadyAlerted = updatedConvo.escalations.some(e => e.type === 'message_threshold');
+      if (!alreadyAlerted) {
+        conversationStore.addEscalation(senderId, {
+          type: 'message_threshold',
+          reason: `${updatedConvo.messageCount} messages exchanged, no booking yet`,
+        });
+        if (whatsapp) {
+          await whatsapp.alertMessageThreshold(creatorProfile.username || senderId, updatedConvo.messageCount, `Stage: ${updatedConvo.conversationStage}`);
+        }
+      }
+    }
+
+    // Log to Sheets
+    await sheets.logConversation(conversationStore.getConversation(senderId));
+
+  } catch (error) {
+    console.error('[META] Error processing message:', error.message);
+  }
+}
+
 // ─── ManyChat Webhook (POST) ───
-// ManyChat sends creator messages here via External Request action
+// ManyChat sends creator messages here via External Request action (legacy, still works)
 // Expected JSON body from ManyChat:
 // {
 //   "subscriber_id": "12345678",
@@ -375,9 +576,12 @@ app.get('/bot/2fa', (req, res) => {
 
 // Health check
 app.get('/health', (req, res) => {
+  const mode = process.env.IG_BOT_USERNAME ? 'browser-bot' : 'meta-api';
   res.json({
     status: 'ok',
-    mode: process.env.IG_BOT_USERNAME ? 'browser-bot' : 'manychat',
+    mode,
+    metaWebhook: '/webhook/instagram',
+    manychatWebhook: '/manychat-webhook',
     botRunning: !!global.igBot?.isRunning,
     timestamp: new Date().toISOString(),
   });
