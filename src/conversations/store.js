@@ -1,7 +1,9 @@
 const fs = require('fs');
 const path = require('path');
 
-const CONVERSATIONS_DIR = path.join(__dirname, '../../data/conversations');
+// Use /data (Railway persistent volume) if available, otherwise local
+const PERSIST_DIR = fs.existsSync('/data') ? '/data' : path.join(__dirname, '../../data');
+const CONVERSATIONS_DIR = path.join(PERSIST_DIR, 'conversations');
 
 // Ensure data directory exists
 if (!fs.existsSync(CONVERSATIONS_DIR)) {

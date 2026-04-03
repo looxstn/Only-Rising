@@ -60,8 +60,14 @@ const weeklyAnalysis = new WeeklyAnalysis(
   whatsapp
 );
 
-// ─── Pending message queue (survives deploys via file written before delay) ───
-const PENDING_FILE = require('path').join(__dirname, '../data/pending-messages.json');
+// ─── Pending message queue (persisted on Railway volume at /data) ───
+const fs = require('fs');
+
+// Use /data (Railway persistent volume) if available, otherwise local
+const PERSIST_DIR = fs.existsSync('/data') ? '/data' : require('path').join(__dirname, '../data');
+const PENDING_FILE = require('path').join(PERSIST_DIR, 'pending-messages.json');
+
+if (!fs.existsSync(PERSIST_DIR)) fs.mkdirSync(PERSIST_DIR, { recursive: true });
 
 function loadPending() {
   try {
@@ -71,8 +77,6 @@ function loadPending() {
 }
 
 function savePending(queue) {
-  const dir = require('path').dirname(PENDING_FILE);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(PENDING_FILE, JSON.stringify(queue, null, 2));
 }
 
@@ -86,8 +90,6 @@ function removePending(subscriberId) {
   const queue = loadPending().filter(p => p.subscriberId !== subscriberId);
   savePending(queue);
 }
-
-const fs = require('fs');
 
 // ─── Middleware ───
 
