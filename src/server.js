@@ -80,85 +80,79 @@ app.use(express.urlencoded({ extended: true }));
 // }
 
 app.post('/manychat-webhook', async (req, res) => {
+  const body = req.body;
+  console.log('[MANYCHAT WEBHOOK] Received:', JSON.stringify(body).substring(0, 500));
+
+  const subscriberId = body.subscriber_id;
+  const messageText = body.message || body.last_input_text || body.text;
+
+  if (!subscriberId || !messageText) {
+    console.warn('[MANYCHAT WEBHOOK] Missing subscriber_id or message');
+    return res.status(400).json({ error: 'subscriber_id and message are required' });
+  }
+
+  // Respond to ManyChat IMMEDIATELY so it doesn't timeout
+  // We'll send the actual reply via ManyChat API after a delay
+  res.json({ success: true, message: 'processing' });
+
+  // Process in background with realistic delay
+  processMessage(subscriberId, messageText, body).catch(err => {
+    console.error('[MANYCHAT WEBHOOK] Background error:', err.message);
+  });
+});
+
+async function processMessage(subscriberId, messageText, body) {
   try {
-    const body = req.body;
-    console.log('[MANYCHAT WEBHOOK] Received:', JSON.stringify(body).substring(0, 500));
-
-    // Validate required fields
-    const subscriberId = body.subscriber_id;
-    const messageText = body.message || body.last_input_text || body.text;
-
-    if (!subscriberId || !messageText) {
-      console.warn('[MANYCHAT WEBHOOK] Missing subscriber_id or message');
-      return res.status(400).json({ error: 'subscriber_id and message are required' });
-    }
-
-    // Verify webhook secret if configured
-    if (process.env.MANYCHAT_WEBHOOK_SECRET) {
-      const authHeader = req.headers['authorization'] || req.headers['x-webhook-secret'];
-      if (authHeader !== process.env.MANYCHAT_WEBHOOK_SECRET && authHeader !== `Bearer ${process.env.MANYCHAT_WEBHOOK_SECRET}`) {
-        console.warn('[MANYCHAT WEBHOOK] Invalid webhook secret');
-        return res.status(401).json({ error: 'Unauthorized' });
-      }
-    }
-
-    // Build creator profile from ManyChat data
     const username = body.ig_username || body.username || body.first_name || 'unknown';
     const followerCount = body.follower_count || 0;
     const page = body.page || 'charmframes';
 
-    const profile = {
-      username,
-      follower_count: followerCount,
-      page,
-    };
+    const profile = { username, follower_count: followerCount, page };
 
-    // Set profile in conversation store (use ManyChat subscriber_id as the user key)
+    // Store message and generate AI response
     conversationStore.setProfile(subscriberId, username, page);
-
-    // Add creator message to conversation history
     conversationStore.addMessage(subscriberId, 'creator', messageText);
-
-    // Get full conversation for AI context
     const conversation = conversationStore.getConversation(subscriberId);
-
-    // Generate AI response
     const aiResponse = await ai.generateResponse(conversation.messages, profile);
 
     if (!aiResponse || !aiResponse.message) {
       console.error('[MSG] AI returned no message');
-      return res.status(500).json({ error: 'AI returned no message' });
+      return;
     }
 
     console.log(`[AI] Response for ${subscriberId} (@${username}): ${aiResponse.message}`);
     console.log(`[AI] Stage: ${aiResponse.conversation_stage} | Escalation: ${JSON.stringify(aiResponse.escalation)} | Qualification: ${JSON.stringify(aiResponse.qualification)}`);
 
-    // No delay here — ManyChat has a 10s timeout on External Requests.
-    // If we delay, ManyChat times out and sends the old ai_response value.
-    // Use ManyChat's built-in Smart Delay if you want a typing effect.
+    // ─── Realistic delay: 1-5 minutes ───
+    // Vary based on message length and randomness
+    const minDelay = 60 * 1000;   // 1 min
+    const maxDelay = 5 * 60 * 1000; // 5 min
+    const delay = Math.floor(Math.random() * (maxDelay - minDelay)) + minDelay;
+    console.log(`[TYPING] Waiting ${Math.round(delay / 1000)}s before replying to @${username}...`);
 
-    // Store assistant message
+    await new Promise(resolve => setTimeout(resolve, delay));
+
+    // Send via ManyChat API
+    await manychat.sendMessage(subscriberId, aiResponse.message);
+    console.log(`[MSG] Replied to @${username}: ${aiResponse.message.substring(0, 60)}...`);
+
+    // Store and process everything else
     conversationStore.addMessage(subscriberId, 'assistant', aiResponse.message);
 
-    // Update conversation stage
     if (aiResponse.conversation_stage) {
       conversationStore.updateStage(subscriberId, aiResponse.conversation_stage);
     }
 
-    // Process qualification data
     if (aiResponse.qualification) {
-      const q = aiResponse.qualification;
-      conversationStore.updateQualification(subscriberId, q.field, q.value);
+      conversationStore.updateQualification(subscriberId, aiResponse.qualification.field, aiResponse.qualification.value);
     }
 
-    // Mark if Calendly was sent
     if (aiResponse.send_calendly) {
       const convo = conversationStore.getConversation(subscriberId);
       convo.calendlySent = true;
       conversationStore.saveConversation(subscriberId, convo);
     }
 
-    // Process escalations
     if (aiResponse.escalation) {
       conversationStore.addEscalation(subscriberId, aiResponse.escalation);
       await whatsapp.processEscalation(
@@ -168,45 +162,26 @@ app.post('/manychat-webhook', async (req, res) => {
       );
     }
 
-    // Check message threshold (10+ messages without booking)
+    // Check message threshold
     const updatedConvo = conversationStore.getConversation(subscriberId);
     if (updatedConvo.messageCount >= 10 && !updatedConvo.calendlySent) {
-      const alreadyAlerted = updatedConvo.escalations.some(
-        e => e.type === 'message_threshold'
-      );
+      const alreadyAlerted = updatedConvo.escalations.some(e => e.type === 'message_threshold');
       if (!alreadyAlerted) {
         conversationStore.addEscalation(subscriberId, {
           type: 'message_threshold',
           reason: `${updatedConvo.messageCount} messages exchanged, no booking yet`,
         });
-        await whatsapp.alertMessageThreshold(
-          username || subscriberId,
-          updatedConvo.messageCount,
-          `Stage: ${updatedConvo.conversationStage}`
-        );
+        await whatsapp.alertMessageThreshold(username || subscriberId, updatedConvo.messageCount, `Stage: ${updatedConvo.conversationStage}`);
       }
     }
 
-    // Log to Google Sheets
-    const finalConvo = conversationStore.getConversation(subscriberId);
-    await sheets.logConversation(finalConvo);
-
-    console.log(`[MSG] Replied to @${username}: ${aiResponse.message.substring(0, 50)}...`);
-
-    // Return the AI response to ManyChat so it can also be used in the flow
-    // ManyChat can use {{ai_response}} custom field or the response body
-    return res.json({
-      success: true,
-      message: aiResponse.message,
-      conversation_stage: aiResponse.conversation_stage,
-      send_calendly: aiResponse.send_calendly || false,
-    });
+    // Log to Sheets
+    await sheets.logConversation(conversationStore.getConversation(subscriberId));
 
   } catch (error) {
-    console.error('[MANYCHAT WEBHOOK] Error:', error.message);
-    return res.status(500).json({ error: error.message });
+    console.error('[MSG] Error processing message:', error.message);
   }
-});
+}
 
 // ─── Approval webhook (Twilio incoming WhatsApp) ───
 
